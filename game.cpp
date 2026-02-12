@@ -288,6 +288,94 @@ void GameMap::buildArcticMap() {
 
     link(wpMidW, wpCorrNA); link(wpMidW, wpCorrSC);
     link(wpMidE, wpCorrNB); link(wpMidE, wpCorrSD);
+
+    // === ELEVATED WAYPOINTS (for jumping and multi-level navigation) ===
+    // Building A second floor (stairs go up at -24.5, -24.5 to -23, -23.5)
+    int wpBldA2f = addWP(-20, 3.1f, -20);
+    link(wpBldA, wpBldA2f);  // Connected via stairs
+
+    // Building D second floor (stairs go up at 22.5, 16 to 24, 17)
+    int wpBldD2f = addWP(17, 3.1f, 20);
+    link(wpBldD, wpBldD2f);  // Connected via stairs
+
+    // Crate-hop waypoints (mid plaza crates at y=1.0-1.5)
+    int wpCrateW = addWP(-5.25f, 1.6f, 0);
+    int wpCrateE = addWP(5.25f, 1.6f, 0);
+    link(wpMidW, wpCrateW);  // Jump up from ground
+    link(wpMidE, wpCrateE);  // Jump up from ground
+    link(wpCrateW, wpMid);
+    link(wpCrateE, wpMid);
+
+    // Waypoints near stairs for smooth navigation
+    int wpStairsA = addWP(-23.5f, 0.1f, -24);
+    link(wpBldA, wpStairsA);
+    link(wpStairsA, wpBldA2f);
+
+    int wpStairsD = addWP(23.0f, 0.1f, 16.5f);
+    link(wpBldD, wpStairsD);
+    link(wpStairsD, wpBldD2f);
+
+    // Additional outdoor waypoints for better coverage
+    int wpNW = addWP(-35, 0.1f, -15);
+    int wpNE = addWP(35, 0.1f, -15);
+    int wpSW = addWP(-35, 0.1f, 15);
+    int wpSE = addWP(35, 0.1f, 15);
+    link(wpNW, wpOutNW); link(wpNW, wpMidW); link(wpNW, wpBldA);
+    link(wpNE, wpOutNE); link(wpNE, wpMidE); link(wpNE, wpBldB);
+    link(wpSW, wpOutSW); link(wpSW, wpMidW); link(wpSW, wpBldC);
+    link(wpSE, wpOutSE); link(wpSE, wpMidE); link(wpSE, wpBldD);
+
+    // Connect tower base to nearby buildings
+    link(wpTowerAb, wpBldA);
+    link(wpTowerBb, wpBldD);
+}
+
+// ============================================================================
+// Waypoint Queries
+// ============================================================================
+
+int GameMap::findNearestWaypoint(const Vec3& pos) const {
+    int best = 0;
+    float bestDist = 1e30f;
+    for (int i = 0; i < (int)waypoints_.size(); i++) {
+        float d = (waypoints_[i].position - pos).lengthSq();
+        if (d < bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+bool GameMap::hasObstacleAhead(const Vec3& pos, float yaw, float checkDist, float& obstacleHeight) const {
+    Vec3 forward = {sinf(yaw), 0, cosf(yaw)};
+    // Check at knee height (0.3) and waist height (0.8)
+    for (float h = 0.3f; h <= 1.2f; h += 0.3f) {
+        Vec3 probe = pos + Vec3{0, h, 0};
+        Vec3 hitPt;
+        float hitDist;
+        if (raycast(probe, forward, checkDist, hitPt, hitDist)) {
+            // Found obstacle - check how tall it is
+            // Probe upward from the hit point to find the top
+            Vec3 upProbe = hitPt + Vec3{-forward.x * 0.1f, 0, -forward.z * 0.1f};
+            for (float testH = h; testH <= 3.0f; testH += 0.2f) {
+                Vec3 testPos = {upProbe.x, pos.y + testH, upProbe.z};
+                AABB testBox = {{testPos.x - 0.1f, testPos.y - 0.05f, testPos.z - 0.1f},
+                                {testPos.x + 0.1f, testPos.y + 0.05f, testPos.z + 0.1f}};
+                bool blocked = false;
+                for (const auto& b : blocks_) {
+                    if (testBox.intersects(b.bounds)) { blocked = true; break; }
+                }
+                if (!blocked) {
+                    obstacleHeight = testH - pos.y;
+                    return true;
+                }
+            }
+            obstacleHeight = 3.0f; // Very tall obstacle, can't jump over
+            return true;
+        }
+    }
+    return false;
 }
 
 // ============================================================================

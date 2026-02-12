@@ -2,7 +2,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
 #include <vector>
+#include <algorithm>
 
 // ============================================================================
 // Shader Sources
@@ -74,6 +76,41 @@ void main() {
     }
 }
 )";
+
+// ============================================================================
+// Particle Shader
+// ============================================================================
+
+static const char* particleVertSrc = R"(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aColor;
+layout(location=2) in float aSize;
+uniform mat4 uVP;
+out vec4 vColor;
+void main() {
+    gl_Position = uVP * vec4(aPos, 1.0);
+    gl_PointSize = aSize / gl_Position.w * 400.0;
+    vColor = aColor;
+}
+)";
+
+static const char* particleFragSrc = R"(
+#version 330 core
+in vec4 vColor;
+out vec4 FragColor;
+void main() {
+    // Soft circle shape
+    vec2 coord = gl_PointCoord - vec2(0.5);
+    float dist = length(coord);
+    if (dist > 0.5) discard;
+    float alpha = smoothstep(0.5, 0.2, dist) * vColor.a;
+    FragColor = vec4(vColor.rgb, alpha);
+}
+)";
+
+static float pRandf() { return (float)rand() / RAND_MAX; }
+static float pRandf(float mn, float mx) { return mn + pRandf() * (mx - mn); }
 
 // ============================================================================
 // 8x8 Bitmap Font (CP437 subset, printable ASCII 32-126)
@@ -333,8 +370,18 @@ void Renderer::init(int width, int height) {
         compileShader(GL_VERTEX_SHADER, hudVertSrc),
         compileShader(GL_FRAGMENT_SHADER, hudFragSrc));
 
+    particleShader_ = linkProgram(
+        compileShader(GL_VERTEX_SHADER, particleVertSrc),
+        compileShader(GL_FRAGMENT_SHADER, particleFragSrc));
+
+    glEnable(GL_PROGRAM_POINT_SIZE);
+
     buildPrimitiveMeshes();
+    buildParticleMesh();
     buildFontTexture();
+
+    particles_.reserve(MAX_PARTICLES);
+    footprints_.reserve(MAX_FOOTPRINTS);
 }
 
 void Renderer::shutdown() {
@@ -343,9 +390,11 @@ void Renderer::shutdown() {
     if (sphereVAO_) { glDeleteVertexArrays(1, &sphereVAO_); glDeleteBuffers(1, &sphereVBO_); }
     if (cylinderVAO_) { glDeleteVertexArrays(1, &cylinderVAO_); glDeleteBuffers(1, &cylinderVBO_); }
     if (quadVAO_) { glDeleteVertexArrays(1, &quadVAO_); glDeleteBuffers(1, &quadVBO_); }
+    if (particleVAO_) { glDeleteVertexArrays(1, &particleVAO_); glDeleteBuffers(1, &particleVBO_); }
     if (fontTexture_) glDeleteTextures(1, &fontTexture_);
     if (worldShader_) glDeleteProgram(worldShader_);
     if (hudShader_) glDeleteProgram(hudShader_);
+    if (particleShader_) glDeleteProgram(particleShader_);
 }
 
 void Renderer::resize(int width, int height) {
@@ -652,6 +701,7 @@ void Renderer::drawCylinder(const Mat4& model, const Vec3& color) {
 // ============================================================================
 
 void Renderer::beginFrame(const Vec3& cameraPos, float yaw, float pitch) {
+    cameraPos_ = cameraPos;
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     float aspect = (float)width_ / (float)height_;
@@ -1159,4 +1209,248 @@ void Renderer::renderKillFeed(const char* messages[], int count, int screenW, in
 
 void Renderer::endFrame() {
     // Nothing needed - swap is done by GLFW
+}
+
+// ============================================================================
+// Particle System
+// ============================================================================
+
+struct ParticleVertex {
+    float x, y, z;    // position
+    float r, g, b, a; // color
+    float size;        // point size
+};
+
+void Renderer::buildParticleMesh() {
+    glGenVertexArrays(1, &particleVAO_);
+    glGenBuffers(1, &particleVBO_);
+    glBindVertexArray(particleVAO_);
+    glBindBuffer(GL_ARRAY_BUFFER, particleVBO_);
+    // Allocate buffer for max particles
+    glBufferData(GL_ARRAY_BUFFER, MAX_PARTICLES * sizeof(ParticleVertex), nullptr, GL_DYNAMIC_DRAW);
+    // position
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex), (void*)0);
+    glEnableVertexAttribArray(0);
+    // color (rgba)
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    // size
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(ParticleVertex), (void*)(7 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glBindVertexArray(0);
+}
+
+void Renderer::updateParticles(float dt) {
+    for (auto it = particles_.begin(); it != particles_.end();) {
+        it->life -= dt;
+        if (it->life <= 0) {
+            it = particles_.erase(it);
+            continue;
+        }
+
+        // Physics
+        it->velocity.y -= it->gravity * dt;
+        it->position += it->velocity * dt;
+
+        // Ground collision for non-snow particles
+        if (it->position.y < 0.01f && it->type != ParticleType::SNOW) {
+            it->position.y = 0.01f;
+            it->velocity.y *= -0.3f;
+            it->velocity.x *= 0.8f;
+            it->velocity.z *= 0.8f;
+        }
+
+        // Snow wraps when hitting ground
+        if (it->type == ParticleType::SNOW && it->position.y < 0) {
+            it->life = 0; // Remove
+        }
+
+        ++it;
+    }
+}
+
+void Renderer::renderParticles() {
+    if (particles_.empty()) return;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE); // Don't write to depth buffer
+
+    std::vector<ParticleVertex> verts;
+    verts.reserve(particles_.size());
+
+    for (const auto& p : particles_) {
+        float lifeFrac = p.life / p.maxLife;
+        float alpha = lifeFrac;
+
+        // Snow fades differently
+        if (p.type == ParticleType::SNOW) {
+            alpha = 0.7f;
+        } else if (p.type == ParticleType::MUZZLE_SPARK) {
+            alpha = lifeFrac * 2.0f; // Brighter
+        }
+
+        verts.push_back({
+            p.position.x, p.position.y, p.position.z,
+            p.color.x, p.color.y, p.color.z, std::min(alpha, 1.0f),
+            p.size
+        });
+    }
+
+    Mat4 vp = projectionMatrix_ * viewMatrix_;
+    glUseProgram(particleShader_);
+    glUniformMatrix4fv(glGetUniformLocation(particleShader_, "uVP"), 1, GL_FALSE, vp.m);
+
+    glBindVertexArray(particleVAO_);
+    glBindBuffer(GL_ARRAY_BUFFER, particleVBO_);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, verts.size() * sizeof(ParticleVertex), verts.data());
+    glDrawArrays(GL_POINTS, 0, (int)verts.size());
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+void Renderer::spawnSnow(const Vec3& cameraPos) {
+    snowSpawnAccum_ += 1.0f; // Spawn rate per frame call
+    int toSpawn = (int)snowSpawnAccum_;
+    snowSpawnAccum_ -= toSpawn;
+
+    float radius = 50.0f;
+    for (int i = 0; i < toSpawn && (int)particles_.size() < MAX_PARTICLES; i++) {
+        Particle p;
+        p.type = ParticleType::SNOW;
+        p.position = {
+            cameraPos.x + pRandf(-radius, radius),
+            cameraPos.y + pRandf(5.0f, 30.0f),
+            cameraPos.z + pRandf(-radius, radius)
+        };
+        p.velocity = {pRandf(-0.5f, 0.5f), pRandf(-2.0f, -0.8f), pRandf(-0.5f, 0.5f)};
+        p.color = {pRandf(0.9f, 1.0f), pRandf(0.9f, 1.0f), 1.0f};
+        p.life = pRandf(8.0f, 15.0f);
+        p.maxLife = p.life;
+        p.size = pRandf(0.02f, 0.06f);
+        p.gravity = 0.0f; // Snow doesn't accelerate
+        particles_.push_back(p);
+    }
+}
+
+void Renderer::spawnBulletImpact(const Vec3& pos, const Vec3& normal) {
+    int count = 8;
+    for (int i = 0; i < count && (int)particles_.size() < MAX_PARTICLES; i++) {
+        Particle p;
+        p.type = ParticleType::BULLET_IMPACT;
+        p.position = pos + normal * 0.05f;
+        // Sparks fly out in hemisphere around normal
+        Vec3 vel = {pRandf(-3, 3), pRandf(-3, 3), pRandf(-3, 3)};
+        if (vel.dot(normal) < 0) vel = vel - normal * 2.0f * vel.dot(normal);
+        p.velocity = vel * pRandf(0.5f, 2.0f);
+        p.color = {pRandf(0.8f, 1.0f), pRandf(0.6f, 0.9f), pRandf(0.2f, 0.5f)};
+        p.life = pRandf(0.2f, 0.6f);
+        p.maxLife = p.life;
+        p.size = pRandf(0.03f, 0.08f);
+        p.gravity = 8.0f;
+        particles_.push_back(p);
+    }
+    // Dust cloud
+    for (int i = 0; i < 4 && (int)particles_.size() < MAX_PARTICLES; i++) {
+        Particle p;
+        p.type = ParticleType::BULLET_IMPACT;
+        p.position = pos;
+        p.velocity = normal * pRandf(0.5f, 1.5f) + Vec3{pRandf(-0.5f, 0.5f), pRandf(0, 1), pRandf(-0.5f, 0.5f)};
+        p.color = {0.7f, 0.7f, 0.7f};
+        p.life = pRandf(0.3f, 0.8f);
+        p.maxLife = p.life;
+        p.size = pRandf(0.08f, 0.15f);
+        p.gravity = 1.0f;
+        particles_.push_back(p);
+    }
+}
+
+void Renderer::spawnBloodSplatter(const Vec3& pos) {
+    for (int i = 0; i < 12 && (int)particles_.size() < MAX_PARTICLES; i++) {
+        Particle p;
+        p.type = ParticleType::BLOOD;
+        p.position = pos + Vec3{0, PLAYER_HEIGHT * 0.5f, 0};
+        p.velocity = {pRandf(-3, 3), pRandf(0, 4), pRandf(-3, 3)};
+        p.color = {pRandf(0.5f, 0.8f), pRandf(0.0f, 0.1f), pRandf(0.0f, 0.05f)};
+        p.life = pRandf(0.3f, 1.0f);
+        p.maxLife = p.life;
+        p.size = pRandf(0.04f, 0.1f);
+        p.gravity = 10.0f;
+        particles_.push_back(p);
+    }
+}
+
+void Renderer::spawnMuzzleSpark(const Vec3& pos, const Vec3& dir) {
+    for (int i = 0; i < 6 && (int)particles_.size() < MAX_PARTICLES; i++) {
+        Particle p;
+        p.type = ParticleType::MUZZLE_SPARK;
+        p.position = pos;
+        p.velocity = dir * pRandf(5, 15) + Vec3{pRandf(-2, 2), pRandf(-1, 2), pRandf(-2, 2)};
+        p.color = {1.0f, pRandf(0.7f, 1.0f), pRandf(0.2f, 0.5f)};
+        p.life = pRandf(0.05f, 0.15f);
+        p.maxLife = p.life;
+        p.size = pRandf(0.02f, 0.05f);
+        p.gravity = 3.0f;
+        particles_.push_back(p);
+    }
+}
+
+void Renderer::spawnFootprintDust(const Vec3& pos) {
+    for (int i = 0; i < 3 && (int)particles_.size() < MAX_PARTICLES; i++) {
+        Particle p;
+        p.type = ParticleType::FOOTPRINT_DUST;
+        p.position = pos + Vec3{pRandf(-0.2f, 0.2f), 0.05f, pRandf(-0.2f, 0.2f)};
+        p.velocity = {pRandf(-0.3f, 0.3f), pRandf(0.2f, 0.8f), pRandf(-0.3f, 0.3f)};
+        p.color = {0.85f, 0.87f, 0.9f}; // Snow-white dust
+        p.life = pRandf(0.3f, 0.7f);
+        p.maxLife = p.life;
+        p.size = pRandf(0.05f, 0.12f);
+        p.gravity = 1.0f;
+        particles_.push_back(p);
+    }
+}
+
+// ============================================================================
+// Footprints
+// ============================================================================
+
+void Renderer::addFootprint(const Vec3& pos, float yaw, bool isLeft) {
+    if ((int)footprints_.size() >= MAX_FOOTPRINTS) {
+        footprints_.erase(footprints_.begin());
+    }
+    footprints_.push_back({pos, yaw, 20.0f, isLeft}); // 20 second lifetime
+}
+
+void Renderer::updateFootprints(float dt) {
+    for (auto it = footprints_.begin(); it != footprints_.end();) {
+        it->life -= dt;
+        if (it->life <= 0) {
+            it = footprints_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Renderer::renderFootprints() {
+    if (footprints_.empty()) return;
+
+    glDisable(GL_CULL_FACE); // Footprints are flat on ground
+
+    for (const auto& fp : footprints_) {
+        float alpha = std::min(fp.life / 5.0f, 1.0f); // Fade in last 5 seconds
+        Vec3 color = {0.75f * alpha, 0.77f * alpha, 0.82f * alpha}; // Slightly darker than snow
+
+        float sideOff = fp.isLeft ? -0.15f : 0.15f;
+        float offX = sinf(fp.yaw + PI * 0.5f) * sideOff;
+        float offZ = cosf(fp.yaw + PI * 0.5f) * sideOff;
+
+        Mat4 model = Mat4::translate({fp.position.x + offX, fp.position.y + 0.01f, fp.position.z + offZ}) *
+                     Mat4::rotateY(-fp.yaw) *
+                     Mat4::scale({0.12f, 0.01f, 0.25f});
+        drawCube(model, color);
+    }
+
+    glEnable(GL_CULL_FACE);
 }

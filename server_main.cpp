@@ -41,6 +41,15 @@ struct BotData {
     float       stuckTimer = 0;
     float       aimJitter = 0.03f;  // Radians of aim randomness
     InputState  input;
+
+    // A* pathfinding
+    std::vector<int> path;          // Waypoint indices forming current path
+    int              pathIndex = 0; // Current position in path
+    float            pathAge = 0;   // Time since last pathfind
+    float            jumpCooldown = 0;
+    float            combatJumpTimer = 0;
+    float            strafeDir = 1.0f;
+    float            strafeTimer = 0;
 };
 
 static GameMap          g_map;
@@ -65,6 +74,81 @@ static std::vector<KillEvent> g_killFeed;
 
 static float randf() { return (float)rand() / RAND_MAX; }
 static float randf(float mn, float mx) { return mn + randf() * (mx - mn); }
+
+// ============================================================================
+// A* Pathfinding on Waypoint Graph
+// ============================================================================
+
+static std::vector<int> findPath(const GameMap& map, int startWP, int goalWP) {
+    const auto& wps = map.waypoints();
+    int numWP = (int)wps.size();
+    if (startWP < 0 || goalWP < 0 || startWP >= numWP || goalWP >= numWP)
+        return {};
+    if (startWP == goalWP) return {startWP};
+
+    struct Node {
+        float g = 1e30f, f = 1e30f;
+        int parent = -1;
+        bool closed = false;
+    };
+    std::vector<Node> nodes(numWP);
+    nodes[startWP].g = 0;
+    nodes[startWP].f = (wps[goalWP].position - wps[startWP].position).length();
+
+    // Simple open list (vector, find min each time - fine for <50 waypoints)
+    std::vector<int> open;
+    open.push_back(startWP);
+
+    while (!open.empty()) {
+        // Find node with lowest f
+        int bestIdx = 0;
+        for (int i = 1; i < (int)open.size(); i++) {
+            if (nodes[open[i]].f < nodes[open[bestIdx]].f)
+                bestIdx = i;
+        }
+        int current = open[bestIdx];
+        open.erase(open.begin() + bestIdx);
+
+        if (current == goalWP) {
+            // Reconstruct path
+            std::vector<int> path;
+            int n = goalWP;
+            while (n != -1) {
+                path.push_back(n);
+                n = nodes[n].parent;
+            }
+            std::reverse(path.begin(), path.end());
+            return path;
+        }
+
+        nodes[current].closed = true;
+
+        for (int neighbor : wps[current].neighbors) {
+            if (nodes[neighbor].closed) continue;
+            float tentG = nodes[current].g +
+                          (wps[neighbor].position - wps[current].position).length();
+            if (tentG < nodes[neighbor].g) {
+                nodes[neighbor].parent = current;
+                nodes[neighbor].g = tentG;
+                nodes[neighbor].f = tentG +
+                    (wps[goalWP].position - wps[neighbor].position).length();
+                // Add to open if not already there
+                bool found = false;
+                for (int o : open) { if (o == neighbor) { found = true; break; } }
+                if (!found) open.push_back(neighbor);
+            }
+        }
+    }
+
+    return {}; // No path found
+}
+
+// Find the nearest waypoint the bot can reach (closest by distance)
+static int findNearestWaypointToPos(const GameMap& map, const Vec3& pos) {
+    return map.findNearestWaypoint(pos);
+}
+
+// ============================================================================
 
 static int findFreeSlot() {
     for (int i = 0; i < MAX_PLAYERS; i++) {
@@ -380,6 +464,60 @@ static int findNearestVisibleEnemy(int botId, float maxRange) {
     return best;
 }
 
+// Helper: move bot along a path, with jump detection
+static void botFollowPath(BotData& bot, PlayerData& p, float dt) {
+    const auto& waypoints = g_map.waypoints();
+
+    // Advance through path
+    if (bot.pathIndex < (int)bot.path.size()) {
+        int wpIdx = bot.path[bot.pathIndex];
+        Vec3 wp = waypoints[wpIdx].position;
+        Vec3 toWP = wp - p.position;
+        float distXZ = sqrtf(toWP.x * toWP.x + toWP.z * toWP.z);
+        float distY = wp.y - p.position.y;
+
+        if (distXZ < 2.0f && fabsf(distY) < 2.0f) {
+            bot.pathIndex++;
+            if (bot.pathIndex >= (int)bot.path.size()) {
+                bot.path.clear();
+                bot.pathIndex = 0;
+            }
+            return;
+        }
+
+        // Face waypoint
+        float targetYaw = atan2f(toWP.x, toWP.z);
+        p.yaw = targetYaw;
+        bot.input.yaw = p.yaw;
+        bot.input.pitch = 0;
+        bot.input.keys |= InputState::KEY_W;
+
+        // Jump if waypoint is above us (stairs, crates, towers)
+        if (distY > 0.5f && bot.jumpCooldown <= 0) {
+            bot.input.keys |= InputState::KEY_JUMP;
+            bot.jumpCooldown = 0.4f;
+        }
+
+        // Jump over obstacles detected ahead
+        float obstacleH = 0;
+        if (g_map.hasObstacleAhead(p.position, p.yaw, 1.5f, obstacleH)) {
+            if (obstacleH < 2.0f && bot.jumpCooldown <= 0) {
+                bot.input.keys |= InputState::KEY_JUMP;
+                bot.jumpCooldown = 0.4f;
+            }
+        }
+    }
+}
+
+// Compute A* path from bot's current position to a target position
+static void botPathfindTo(BotData& bot, const Vec3& target) {
+    int startWP = findNearestWaypointToPos(g_map, g_players[bot.playerId].position);
+    int goalWP = findNearestWaypointToPos(g_map, target);
+    bot.path = findPath(g_map, startWP, goalWP);
+    bot.pathIndex = 0;
+    bot.pathAge = 0;
+}
+
 static void updateBotAI(BotData& bot, float dt) {
     int id = bot.playerId;
     PlayerData& p = g_players[id];
@@ -389,6 +527,8 @@ static void updateBotAI(BotData& bot, float dt) {
         if (p.respawnTimer <= 0) {
             spawnPlayer(id);
             bot.aiState = AIState::PATROL;
+            bot.path.clear();
+            bot.pathIndex = 0;
         }
         return;
     }
@@ -396,6 +536,10 @@ static void updateBotAI(BotData& bot, float dt) {
 
     const auto& waypoints = g_map.waypoints();
     bot.stateTimer -= dt;
+    bot.pathAge += dt;
+    if (bot.jumpCooldown > 0) bot.jumpCooldown -= dt;
+    if (bot.combatJumpTimer > 0) bot.combatJumpTimer -= dt;
+    if (bot.strafeTimer > 0) bot.strafeTimer -= dt;
 
     // Stuck detection
     float moved = (p.position - bot.lastPos).length();
@@ -406,10 +550,16 @@ static void updateBotAI(BotData& bot, float dt) {
     }
     bot.lastPos = p.position;
 
-    // Unstick: pick random waypoint
-    if (bot.stuckTimer > 1.0f) {
-        bot.currentWaypoint = rand() % waypoints.size();
-        bot.targetPos = waypoints[bot.currentWaypoint].position;
+    // Unstick: try jumping first, then repath
+    if (bot.stuckTimer > 0.5f && bot.jumpCooldown <= 0) {
+        bot.input.keys |= InputState::KEY_JUMP;
+        bot.jumpCooldown = 0.4f;
+    }
+    if (bot.stuckTimer > 1.5f) {
+        // Repath to a random waypoint
+        int randWP = rand() % waypoints.size();
+        bot.path = findPath(g_map, g_map.findNearestWaypoint(p.position), randWP);
+        bot.pathIndex = 0;
         bot.stuckTimer = 0;
     }
 
@@ -420,28 +570,26 @@ static void updateBotAI(BotData& bot, float dt) {
         case AIState::PATROL: {
             if (waypoints.empty()) break;
 
-            Vec3 wp = waypoints[bot.currentWaypoint].position;
-            float distToWP = (p.position - wp).length();
-
-            if (distToWP < 2.0f) {
-                // Move to next waypoint (random neighbor)
-                const auto& neighbors = waypoints[bot.currentWaypoint].neighbors;
-                if (!neighbors.empty()) {
-                    bot.currentWaypoint = neighbors[rand() % neighbors.size()];
+            // Generate path if we don't have one
+            if (bot.path.empty() || bot.pathAge > 8.0f) {
+                // Pick a random distant waypoint
+                int curWP = g_map.findNearestWaypoint(p.position);
+                int targetWP = rand() % waypoints.size();
+                // Prefer waypoints that are far away for interesting patrol routes
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    int candidate = rand() % waypoints.size();
+                    if ((waypoints[candidate].position - p.position).lengthSq() >
+                        (waypoints[targetWP].position - p.position).lengthSq()) {
+                        targetWP = candidate;
+                    }
                 }
-                bot.targetPos = waypoints[bot.currentWaypoint].position;
+                bot.path = findPath(g_map, curWP, targetWP);
+                bot.pathIndex = 0;
+                bot.pathAge = 0;
             }
 
-            // Move toward waypoint
-            Vec3 toTarget = bot.targetPos - p.position;
-            toTarget.y = 0;
-            if (toTarget.lengthSq() > 0.1f) {
-                float targetYaw = atan2f(toTarget.x, toTarget.z);
-                p.yaw = targetYaw;
-                bot.input.yaw = p.yaw;
-                bot.input.pitch = 0;
-                bot.input.keys |= InputState::KEY_W;
-            }
+            // Follow path
+            botFollowPath(bot, p, dt);
 
             // Check for enemies
             int enemy = findNearestVisibleEnemy(id, 40.0f);
@@ -450,19 +598,28 @@ static void updateBotAI(BotData& bot, float dt) {
                 bot.aiState = AIState::CHASE;
                 bot.reactionTimer = bot.reactionDelay;
                 bot.stateTimer = 10.0f;
+                bot.path.clear();
             }
 
             // Check for weapon pickups if only have pistol
             if (p.currentWeapon == WeaponType::PISTOL) {
+                float bestPickupDist = 30.0f;
+                Vec3 bestPickupPos;
+                bool foundPickup = false;
                 for (const auto& wp2 : g_map.weaponPickups()) {
                     if (!wp2.active) continue;
                     float d = (p.position - wp2.position).length();
-                    if (d < 25.0f) {
-                        bot.targetPos = wp2.position;
-                        bot.aiState = AIState::PICKUP_WEAPON;
-                        bot.stateTimer = 8.0f;
-                        break;
+                    if (d < bestPickupDist) {
+                        bestPickupDist = d;
+                        bestPickupPos = wp2.position;
+                        foundPickup = true;
                     }
+                }
+                if (foundPickup) {
+                    botPathfindTo(bot, bestPickupPos);
+                    bot.targetPos = bestPickupPos;
+                    bot.aiState = AIState::PICKUP_WEAPON;
+                    bot.stateTimer = 12.0f;
                 }
             }
             break;
@@ -472,19 +629,25 @@ static void updateBotAI(BotData& bot, float dt) {
             int tid = bot.targetPlayerId;
             if (tid < 0 || tid >= MAX_PLAYERS || g_players[tid].state != PlayerState::ALIVE) {
                 bot.aiState = AIState::PATROL;
+                bot.path.clear();
                 break;
             }
 
             Vec3 toEnemy = g_players[tid].position - p.position;
             float dist = toEnemy.length();
 
+            // Repath to enemy periodically
+            if (bot.path.empty() || bot.pathAge > 2.0f) {
+                botPathfindTo(bot, g_players[tid].position);
+            }
+
             // Face enemy
             float targetYaw = atan2f(toEnemy.x, toEnemy.z);
             p.yaw = targetYaw;
 
             // Aim at enemy with jitter
-            float targetPitch = atan2f(toEnemy.y + PLAYER_HEIGHT * 0.5f - PLAYER_EYE_HEIGHT,
-                                       sqrtf(toEnemy.x * toEnemy.x + toEnemy.z * toEnemy.z));
+            float hDist = sqrtf(toEnemy.x * toEnemy.x + toEnemy.z * toEnemy.z);
+            float targetPitch = atan2f(toEnemy.y + PLAYER_HEIGHT * 0.5f - PLAYER_EYE_HEIGHT, hDist);
             p.pitch = targetPitch + randf(-bot.aimJitter, bot.aimJitter);
 
             bot.input.yaw = p.yaw + randf(-bot.aimJitter, bot.aimJitter);
@@ -493,13 +656,29 @@ static void updateBotAI(BotData& bot, float dt) {
             if (dist < getWeaponDef(p.currentWeapon).range * 0.8f && canSeePlayer(id, tid)) {
                 bot.aiState = AIState::ATTACK;
                 bot.stateTimer = 5.0f;
+                bot.strafeTimer = 0;
+                bot.strafeDir = randf() < 0.5f ? 1.0f : -1.0f;
             } else {
-                // Move toward enemy
-                bot.input.keys |= InputState::KEY_W;
+                // Follow path toward enemy
+                botFollowPath(bot, p, dt);
+                // Override yaw to face movement direction while chasing
+                if (!bot.path.empty() && bot.pathIndex < (int)bot.path.size()) {
+                    Vec3 wpPos = waypoints[bot.path[bot.pathIndex]].position;
+                    Vec3 toWP = wpPos - p.position;
+                    p.yaw = atan2f(toWP.x, toWP.z);
+                    bot.input.yaw = p.yaw;
+                }
             }
 
-            if (bot.stateTimer <= 0 || !canSeePlayer(id, tid)) {
+            // Jump while chasing to be unpredictable
+            if (bot.combatJumpTimer <= 0 && randf() < 0.01f) {
+                bot.input.keys |= InputState::KEY_JUMP;
+                bot.combatJumpTimer = randf(1.0f, 3.0f);
+            }
+
+            if (bot.stateTimer <= 0 || (!canSeePlayer(id, tid) && dist > 20.0f)) {
                 bot.aiState = AIState::PATROL;
+                bot.path.clear();
             }
             break;
         }
@@ -508,6 +687,7 @@ static void updateBotAI(BotData& bot, float dt) {
             int tid = bot.targetPlayerId;
             if (tid < 0 || tid >= MAX_PLAYERS || g_players[tid].state != PlayerState::ALIVE) {
                 bot.aiState = AIState::PATROL;
+                bot.path.clear();
                 break;
             }
 
@@ -517,21 +697,41 @@ static void updateBotAI(BotData& bot, float dt) {
             // Face and aim at enemy
             float targetYaw = atan2f(toEnemy.x, toEnemy.z);
             p.yaw = targetYaw + randf(-bot.aimJitter, bot.aimJitter);
-            float targetPitch = atan2f(toEnemy.y + PLAYER_HEIGHT * 0.5f - PLAYER_EYE_HEIGHT,
-                                       sqrtf(toEnemy.x * toEnemy.x + toEnemy.z * toEnemy.z));
+            float hDist = sqrtf(toEnemy.x * toEnemy.x + toEnemy.z * toEnemy.z);
+            float targetPitch = atan2f(toEnemy.y + PLAYER_HEIGHT * 0.5f - PLAYER_EYE_HEIGHT, hDist);
             p.pitch = targetPitch + randf(-bot.aimJitter, bot.aimJitter);
 
             bot.input.yaw = p.yaw;
             bot.input.pitch = p.pitch;
 
-            // Strafe randomly
-            if (randf() < 0.02f) {
-                // Change strafe direction
+            // Advanced strafing: change direction every 1-3 seconds
+            if (bot.strafeTimer <= 0) {
+                bot.strafeDir = -bot.strafeDir;
+                bot.strafeTimer = randf(0.8f, 2.5f);
+                // Sometimes add forward/backward movement
+                if (randf() < 0.3f) {
+                    bot.input.keys |= (dist > 10.0f) ? InputState::KEY_W : InputState::KEY_S;
+                }
             }
-            if (g_serverTick % 120 < 60) {
-                bot.input.keys |= InputState::KEY_A;
-            } else {
+            if (bot.strafeDir > 0) {
                 bot.input.keys |= InputState::KEY_D;
+            } else {
+                bot.input.keys |= InputState::KEY_A;
+            }
+
+            // Combat jumping - jump to dodge
+            if (bot.combatJumpTimer <= 0 && randf() < 0.03f) {
+                bot.input.keys |= InputState::KEY_JUMP;
+                bot.combatJumpTimer = randf(0.8f, 2.0f);
+            }
+
+            // Obstacle jump while strafing
+            float obstH = 0;
+            if (g_map.hasObstacleAhead(p.position, p.yaw + (bot.strafeDir > 0 ? PI * 0.5f : -PI * 0.5f), 1.0f, obstH)) {
+                if (obstH < 2.0f && bot.jumpCooldown <= 0) {
+                    bot.input.keys |= InputState::KEY_JUMP;
+                    bot.jumpCooldown = 0.4f;
+                }
             }
 
             // Shoot (after reaction delay)
@@ -544,6 +744,10 @@ static void updateBotAI(BotData& bot, float dt) {
             if (p.health < 30) {
                 bot.aiState = AIState::RETREAT;
                 bot.stateTimer = 5.0f;
+                bot.path.clear();
+                // Path away from enemy
+                Vec3 fleeTarget = p.position + (p.position - g_players[tid].position).normalize() * 20.0f;
+                botPathfindTo(bot, fleeTarget);
                 break;
             }
 
@@ -551,23 +755,72 @@ static void updateBotAI(BotData& bot, float dt) {
             if (dist > getWeaponDef(p.currentWeapon).range || bot.stateTimer <= 0) {
                 bot.aiState = AIState::CHASE;
                 bot.stateTimer = 10.0f;
+                bot.path.clear();
             }
 
             if (!canSeePlayer(id, tid)) {
                 bot.aiState = AIState::CHASE;
                 bot.stateTimer = 5.0f;
+                // Path to enemy's last known position
+                botPathfindTo(bot, g_players[tid].position);
             }
             break;
         }
 
         case AIState::RETREAT: {
             int tid = bot.targetPlayerId;
-            if (tid >= 0 && tid < MAX_PLAYERS && g_players[tid].state == PlayerState::ALIVE) {
-                // Move away from enemy
+
+            // Follow retreat path
+            if (!bot.path.empty()) {
+                botFollowPath(bot, p, dt);
+            } else if (tid >= 0 && tid < MAX_PLAYERS && g_players[tid].state == PlayerState::ALIVE) {
+                // Generate retreat path away from enemy
                 Vec3 away = p.position - g_players[tid].position;
                 away.y = 0;
                 if (away.lengthSq() > 0.1f) {
-                    float targetYaw = atan2f(away.x, away.z);
+                    Vec3 fleeTarget = p.position + away.normalize() * 25.0f;
+                    botPathfindTo(bot, fleeTarget);
+                }
+            }
+
+            // Jump while retreating for evasion
+            if (bot.combatJumpTimer <= 0 && randf() < 0.04f) {
+                bot.input.keys |= InputState::KEY_JUMP;
+                bot.combatJumpTimer = randf(0.5f, 1.5f);
+            }
+
+            // Shoot back while retreating if enemy visible
+            if (tid >= 0 && tid < MAX_PLAYERS && g_players[tid].state == PlayerState::ALIVE) {
+                Vec3 toEnemy = g_players[tid].position - p.position;
+                if (canSeePlayer(id, tid)) {
+                    // Aim and shoot while running
+                    float aimYaw = atan2f(toEnemy.x, toEnemy.z);
+                    bot.input.yaw = aimYaw + randf(-bot.aimJitter * 2, bot.aimJitter * 2);
+                    float hDist = sqrtf(toEnemy.x * toEnemy.x + toEnemy.z * toEnemy.z);
+                    bot.input.pitch = atan2f(toEnemy.y + PLAYER_HEIGHT * 0.5f - PLAYER_EYE_HEIGHT, hDist);
+                    if (randf() < 0.5f) { // Don't always shoot while retreating
+                        bot.input.keys |= InputState::KEY_SHOOT;
+                    }
+                }
+            }
+
+            if (bot.stateTimer <= 0 || p.health > 60) {
+                bot.aiState = AIState::PATROL;
+                bot.path.clear();
+            }
+            break;
+        }
+
+        case AIState::PICKUP_WEAPON: {
+            // Follow path to weapon pickup
+            if (!bot.path.empty()) {
+                botFollowPath(bot, p, dt);
+            } else {
+                // Direct movement as fallback
+                Vec3 toTarget = bot.targetPos - p.position;
+                toTarget.y = 0;
+                if (toTarget.lengthSq() > 0.1f) {
+                    float targetYaw = atan2f(toTarget.x, toTarget.z);
                     p.yaw = targetYaw;
                     bot.input.yaw = p.yaw;
                     bot.input.pitch = 0;
@@ -575,27 +828,14 @@ static void updateBotAI(BotData& bot, float dt) {
                 }
             }
 
-            if (bot.stateTimer <= 0 || p.health > 60) {
-                bot.aiState = AIState::PATROL;
-            }
-            break;
-        }
-
-        case AIState::PICKUP_WEAPON: {
             Vec3 toTarget = bot.targetPos - p.position;
-            toTarget.y = 0;
             float dist = toTarget.length();
 
             if (dist < 1.5f || bot.stateTimer <= 0 || p.currentWeapon != WeaponType::PISTOL) {
                 bot.aiState = AIState::PATROL;
+                bot.path.clear();
                 break;
             }
-
-            float targetYaw = atan2f(toTarget.x, toTarget.z);
-            p.yaw = targetYaw;
-            bot.input.yaw = p.yaw;
-            bot.input.pitch = 0;
-            bot.input.keys |= InputState::KEY_W;
 
             // If see enemy while going for weapon, fight instead
             int enemy = findNearestVisibleEnemy(id, 20.0f);
@@ -604,6 +844,7 @@ static void updateBotAI(BotData& bot, float dt) {
                 bot.aiState = AIState::ATTACK;
                 bot.reactionTimer = bot.reactionDelay;
                 bot.stateTimer = 5.0f;
+                bot.path.clear();
             }
             break;
         }

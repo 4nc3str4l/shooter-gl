@@ -78,6 +78,11 @@ static float g_hitMarkerTimer = 0;
 static float g_damageFlashTimer = 0;
 static int   g_lastHealth = MAX_HEALTH;
 
+// Footprint tracking
+static float g_footstepAccum = 0;
+static bool  g_footIsLeft = false;
+static Vec3  g_lastFootPos = {0, 0, 0};
+
 // ============================================================================
 // GLFW Callbacks
 // ============================================================================
@@ -555,7 +560,16 @@ int main(int, char**) {
                         bool hitWall = g_map.raycast(eyePos, dir, def.range, wallHit, wallDist);
                         if (hitP >= 0 && (!hitWall || playerDist < wallDist)) {
                             g_hitMarkerTimer = 0.2f;
+                            g_renderer.spawnBloodSplatter(g_players[hitP].position);
                         }
+                        if (hitWall && (!hitP || wallDist < playerDist)) {
+                            // Compute wall normal (approximate)
+                            Vec3 wallNorm = {0, 1, 0}; // Default up
+                            g_renderer.spawnBulletImpact(wallHit, wallNorm);
+                        }
+
+                        // Muzzle sparks
+                        g_renderer.spawnMuzzleSpark(eyePos + dir * 0.5f, dir);
                     }
 
                     tickPlayer(g_players[g_localId], g_currentInput, g_map, g_deltaTime);
@@ -576,6 +590,28 @@ int main(int, char**) {
                 // Receive server updates
                 receivePackets();
 
+                // Update particles and footprints
+                g_renderer.updateParticles(g_deltaTime);
+                g_renderer.updateFootprints(g_deltaTime);
+
+                // Footprint tracking
+                if (g_localId >= 0 && g_players[g_localId].state == PlayerState::ALIVE) {
+                    Vec3 pos = g_players[g_localId].position;
+                    Vec3 diff = pos - g_lastFootPos;
+                    diff.y = 0;
+                    float moveDist = diff.length();
+                    if (moveDist > 0.01f) {
+                        g_footstepAccum += moveDist;
+                        g_lastFootPos = pos;
+                    }
+                    if (g_footstepAccum >= 1.8f) {
+                        g_footstepAccum = 0;
+                        g_renderer.addFootprint(pos, g_yaw, g_footIsLeft);
+                        g_renderer.spawnFootprintDust(pos);
+                        g_footIsLeft = !g_footIsLeft;
+                    }
+                }
+
                 // Render
                 Vec3 camPos;
                 float renderYaw = g_yaw;
@@ -594,6 +630,10 @@ int main(int, char**) {
 
                 g_renderer.beginFrame(camPos, renderYaw, renderPitch);
                 g_renderer.renderMap();
+                g_renderer.renderFootprints();
+
+                // Snow
+                g_renderer.spawnSnow(camPos);
 
                 // Render other players
                 for (int i = 0; i < MAX_PLAYERS; i++) {
@@ -605,6 +645,9 @@ int main(int, char**) {
                 for (const auto& wp : g_weaponPickups) {
                     g_renderer.renderWeaponPickup(wp, g_time);
                 }
+
+                // Particles (3D scene)
+                g_renderer.renderParticles();
 
                 // Muzzle flash (bright quad in front of weapon)
                 if (g_muzzleFlashTimer > 0 && g_localId >= 0) {
@@ -657,6 +700,9 @@ int main(int, char**) {
                 receivePackets();
                 sendInput(); // Keep sending so server knows we're alive
 
+                g_renderer.updateParticles(g_deltaTime);
+                g_renderer.updateFootprints(g_deltaTime);
+
                 Vec3 camPos;
                 if (g_localId >= 0) {
                     camPos = g_players[g_localId].position;
@@ -665,6 +711,9 @@ int main(int, char**) {
 
                 g_renderer.beginFrame(camPos, g_yaw, g_pitch - 0.3f);
                 g_renderer.renderMap();
+                g_renderer.renderFootprints();
+                g_renderer.spawnSnow(camPos);
+                g_renderer.renderParticles();
 
                 for (int i = 0; i < MAX_PLAYERS; i++) {
                     g_renderer.renderPlayer(g_players[i], i == g_localId);

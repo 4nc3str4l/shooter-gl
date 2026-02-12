@@ -45,6 +45,12 @@ public:
     std::vector<WeaponPickup>&      weaponPickups() { return pickups_; }
     const std::vector<WeaponPickup>& weaponPickups() const { return pickups_; }
     const std::vector<Waypoint>&    waypoints() const { return waypoints_; }
+    std::vector<Waypoint>&          waypoints() { return waypoints_; }
+
+    // Find nearest waypoint to a position
+    int findNearestWaypoint(const Vec3& pos) const;
+    // Check if there's an obstacle at waist height in front of a position
+    bool hasObstacleAhead(const Vec3& pos, float yaw, float checkDist, float& obstacleHeight) const;
 
     // Collision
     bool isOnGround(const Vec3& pos, float radius, float height) const;
