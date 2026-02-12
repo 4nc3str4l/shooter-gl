@@ -44,6 +44,7 @@ struct InputPacket {
     uint16_t keys = 0;
     float    yaw = 0;
     float    pitch = 0;
+    uint8_t  classSelect = 0xFF; // 0xFF = no change, 0-3 = select class
 };
 
 // Client -> Server: Disconnect
@@ -69,6 +70,8 @@ struct NetPlayerState {
     uint8_t  ammo = 0;
     int16_t  vehicleId = -1;
     uint8_t  teamId = 0;
+    uint8_t  playerClass = 0;
+    uint8_t  spotted = 0;
 };
 
 // Per-vehicle state in snapshot

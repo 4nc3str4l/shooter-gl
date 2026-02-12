@@ -843,6 +843,9 @@ void Renderer::renderFirstPersonWeapon(WeaponType type, float fireCooldown, floa
         case WeaponType::SHOTGUN: weapColor = {0.55f, 0.35f, 0.2f}; break;
         case WeaponType::RIFLE:   weapColor = {0.25f, 0.3f, 0.25f}; break;
         case WeaponType::SNIPER:  weapColor = {0.2f, 0.2f, 0.3f}; break;
+        case WeaponType::SMG:     weapColor = {0.35f, 0.35f, 0.3f}; break;
+        case WeaponType::LMG:     weapColor = {0.3f, 0.28f, 0.22f}; break;
+        case WeaponType::ROCKET:  weapColor = {0.3f, 0.35f, 0.28f}; break;
         default:                  weapColor = {0.4f, 0.4f, 0.4f}; break;
     }
 
@@ -898,6 +901,56 @@ void Renderer::renderFirstPersonWeapon(WeaponType type, float fireCooldown, floa
             // Stock
             Mat4 stock = Mat4::translate(basePos + Vec3{0, -0.01f, 0.14f}) * Mat4::scale({0.04f, 0.06f, 0.18f});
             drawCube(stock, weapColor * 0.9f);
+            break;
+        }
+        case WeaponType::SMG: {
+            // Compact body
+            Mat4 body = Mat4::translate(basePos) * Mat4::scale({0.05f, 0.08f, 0.1f});
+            drawCube(body, weapColor);
+            // Short barrel
+            Mat4 barrel = Mat4::translate(basePos + Vec3{0, 0.01f, -0.18f}) * Mat4::scale({0.03f, 0.03f, 0.22f});
+            drawCube(barrel, weapColor * 0.7f);
+            // Grip
+            Mat4 grip = Mat4::translate(basePos + Vec3{0, -0.08f, -0.08f}) * Mat4::scale({0.03f, 0.06f, 0.03f});
+            drawCube(grip, {0.2f, 0.2f, 0.2f});
+            // Magazine
+            Mat4 mag = Mat4::translate(basePos + Vec3{0, -0.1f, 0.0f}) * Mat4::scale({0.03f, 0.08f, 0.03f});
+            drawCube(mag, {0.25f, 0.25f, 0.25f});
+            break;
+        }
+        case WeaponType::LMG: {
+            // Heavy body
+            Mat4 body = Mat4::translate(basePos) * Mat4::scale({0.07f, 0.12f, 0.15f});
+            drawCube(body, weapColor);
+            // Long thick barrel
+            Mat4 barrel = Mat4::translate(basePos + Vec3{0, 0.03f, -0.3f}) * Mat4::scale({0.04f, 0.04f, 0.4f});
+            drawCube(barrel, weapColor * 0.6f);
+            // Box magazine
+            Mat4 boxMag = Mat4::translate(basePos + Vec3{0, -0.12f, -0.02f}) * Mat4::scale({0.06f, 0.1f, 0.06f});
+            drawCube(boxMag, {0.2f, 0.2f, 0.2f});
+            // Bipod
+            Mat4 bipod1 = Mat4::translate(basePos + Vec3{-0.04f, -0.1f, -0.2f}) * Mat4::scale({0.01f, 0.08f, 0.01f});
+            drawCube(bipod1, {0.15f, 0.15f, 0.15f});
+            Mat4 bipod2 = Mat4::translate(basePos + Vec3{0.04f, -0.1f, -0.2f}) * Mat4::scale({0.01f, 0.08f, 0.01f});
+            drawCube(bipod2, {0.15f, 0.15f, 0.15f});
+            // Stock
+            Mat4 stock = Mat4::translate(basePos + Vec3{0, 0, 0.15f}) * Mat4::scale({0.06f, 0.08f, 0.15f});
+            drawCube(stock, weapColor * 0.85f);
+            break;
+        }
+        case WeaponType::ROCKET: {
+            // Tube body
+            Mat4 tube = Mat4::translate(basePos + Vec3{0, 0.03f, -0.15f}) * Mat4::scale({0.06f, 0.06f, 0.45f});
+            drawCube(tube, weapColor);
+            // Rear flared end
+            Mat4 rear = Mat4::translate(basePos + Vec3{0, 0.03f, 0.15f}) * Mat4::scale({0.08f, 0.08f, 0.08f});
+            drawCube(rear, weapColor * 0.7f);
+            // Sight on top
+            Mat4 sight = Mat4::translate(basePos + Vec3{0, 0.08f, -0.05f}) * Mat4::scale({0.02f, 0.04f, 0.06f});
+            drawCube(sight, {0.2f, 0.2f, 0.2f});
+            // Grip
+            Mat4 grip = Mat4::translate(basePos + Vec3{0, -0.04f, 0.0f}) * Mat4::scale({0.04f, 0.06f, 0.04f});
+            drawCube(grip, {0.25f, 0.25f, 0.25f});
             break;
         }
         default: break;

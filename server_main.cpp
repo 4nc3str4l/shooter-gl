@@ -86,6 +86,10 @@ static std::vector<KillEvent> g_killFeed;
 static float randf() { return (float)rand() / RAND_MAX; }
 static float randf(float mn, float mx) { return mn + randf() * (mx - mn); }
 
+// Forward declarations
+static void vehicleDamage(int victimId, int attackerId, int damage);
+static bool canSeePlayer(int botId, int targetId);
+
 // ============================================================================
 // A* Pathfinding on Waypoint Graph
 // ============================================================================
@@ -185,11 +189,15 @@ static void spawnPlayer(int id) {
     g_players[id].respawnTimer = 0;
     g_players[id].vehicleId = -1;
     g_players[id].isDriver = false;
+    g_players[id].abilityCooldown = 0;
+    g_players[id].spotted = false;
+    g_players[id].spottedTimer = 0;
 
-    if (g_players[id].currentWeapon == WeaponType::NONE) {
-        g_players[id].currentWeapon = WeaponType::PISTOL;
-        g_players[id].ammo = getWeaponDef(WeaponType::PISTOL).magSize;
-    }
+    // Apply class loadout
+    const auto& cdef = getClassDef(g_players[id].playerClass);
+    g_players[id].currentWeapon = cdef.primaryWeapon;
+    g_players[id].ammo = getWeaponDef(cdef.primaryWeapon).magSize;
+    g_players[id].health = MAX_HEALTH + cdef.extraHealth;
 }
 
 // ============================================================================
@@ -234,6 +242,8 @@ static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
         np.ammo = (uint8_t)std::clamp(g_players[i].ammo, 0, 255);
         np.vehicleId = g_players[i].vehicleId;
         np.teamId = g_players[i].teamId;
+        np.playerClass = (uint8_t)g_players[i].playerClass;
+        np.spotted = g_players[i].spotted ? 1 : 0;
         memcpy(buf + offset, &np, sizeof(np));
         offset += sizeof(np);
     }
@@ -373,6 +383,22 @@ static void handleInput(const InputPacket& pkt, const sockaddr_in& from) {
                 g_clients[i].lastInput.yaw = pkt.yaw;
                 g_clients[i].lastInput.pitch = pkt.pitch;
                 g_clients[i].timeoutTimer = 0;
+
+                // Class selection (can change anytime, applies on next spawn)
+                if (pkt.classSelect < (uint8_t)PlayerClass::COUNT) {
+                    PlayerClass newClass = (PlayerClass)pkt.classSelect;
+                    if (newClass != g_players[i].playerClass) {
+                        g_players[i].playerClass = newClass;
+                        const auto& cdef = getClassDef(newClass);
+                        // If alive, apply new loadout immediately
+                        if (g_players[i].state == PlayerState::ALIVE) {
+                            g_players[i].currentWeapon = cdef.primaryWeapon;
+                            g_players[i].ammo = getWeaponDef(cdef.primaryWeapon).magSize;
+                            g_players[i].health = MAX_HEALTH + cdef.extraHealth;
+                        }
+                        printf("Player %d switched to %s class\n", i, cdef.name);
+                    }
+                }
             }
             return;
         }
@@ -483,6 +509,113 @@ static void processShot(int shooterId) {
                        g_players[hitPlayer].name[0] ? g_players[hitPlayer].name : "Bot");
             }
         }
+    }
+}
+
+// ============================================================================
+// Class Abilities
+// ============================================================================
+
+static void processAbility(int playerId, const InputState& input) {
+    PlayerData& p = g_players[playerId];
+    if (p.state != PlayerState::ALIVE) return;
+    if (!(input.keys & InputState::KEY_ABILITY)) return;
+    if (p.abilityCooldown > 0) return;
+
+    const auto& cdef = getClassDef(p.playerClass);
+    p.abilityCooldown = cdef.abilityCooldown;
+
+    switch (cdef.ability) {
+        case AbilityType::FRAG_GRENADE: {
+            // Throw grenade: instant damage in area
+            Vec3 eyePos = p.position;
+            eyePos.y += PLAYER_EYE_HEIGHT;
+            Vec3 dir = {sinf(p.yaw) * cosf(p.pitch), sinf(p.pitch), cosf(p.yaw) * cosf(p.pitch)};
+            dir = dir.normalize();
+            Vec3 grenadePos = eyePos + dir * 15.0f; // Grenade lands 15m ahead
+            grenadePos.y = 0.5f;
+
+            // Damage all enemies in 6m radius
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                if (i == playerId) continue;
+                if (g_players[i].state != PlayerState::ALIVE) continue;
+                if (g_players[i].teamId == p.teamId) continue;
+                float d = (g_players[i].position - grenadePos).length();
+                if (d < 6.0f) {
+                    int dmg = (int)(60.0f * (1.0f - d / 6.0f));
+                    vehicleDamage(i, playerId, dmg);
+                }
+            }
+            printf("Player %d threw frag grenade!\n", playerId);
+            break;
+        }
+        case AbilityType::ROCKET_LAUNCHER: {
+            // Fire a rocket: hitscan with big damage, mainly for vehicles
+            Vec3 eyePos = p.position;
+            eyePos.y += PLAYER_EYE_HEIGHT;
+            Vec3 dir = {sinf(p.yaw) * cosf(p.pitch), sinf(p.pitch), cosf(p.yaw) * cosf(p.pitch)};
+            dir = dir.normalize();
+
+            // Check vehicle hit
+            float bestDist = 400.0f;
+            int hitVeh = -1;
+            for (int v = 0; v < g_numVehicles; v++) {
+                if (!g_vehicles[v].active) continue;
+                const auto& vdef = getVehicleDef(g_vehicles[v].type);
+                AABB vBox = {
+                    g_vehicles[v].position - Vec3{vdef.length*0.5f, 0, vdef.width*0.5f},
+                    g_vehicles[v].position + Vec3{vdef.length*0.5f, vdef.height, vdef.width*0.5f}
+                };
+                float t;
+                if (vBox.raycast(eyePos, dir, t) && t < bestDist) {
+                    bestDist = t;
+                    hitVeh = v;
+                }
+            }
+            // Check player hit too
+            float pDist = 400.0f;
+            int hitP = GameMap::raycastPlayers(eyePos, dir, 400.0f, g_players, MAX_PLAYERS, playerId, pDist);
+
+            if (hitVeh >= 0 && bestDist < pDist) {
+                g_vehicles[hitVeh].health -= 150; // Big anti-vehicle damage
+                printf("Player %d rocket hit vehicle %d!\n", playerId, hitVeh);
+            } else if (hitP >= 0 && g_players[hitP].teamId != p.teamId) {
+                vehicleDamage(hitP, playerId, 80);
+            }
+            break;
+        }
+        case AbilityType::AMMO_DROP: {
+            // Refill ammo for all nearby teammates
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                if (g_players[i].state != PlayerState::ALIVE) continue;
+                if (g_players[i].teamId != p.teamId) continue;
+                float d = (g_players[i].position - p.position).length();
+                if (d < 10.0f) {
+                    g_players[i].ammo = getWeaponDef(g_players[i].currentWeapon).magSize;
+                }
+            }
+            printf("Player %d dropped ammo!\n", playerId);
+            break;
+        }
+        case AbilityType::SPOT_ENEMIES: {
+            // Spot all visible enemies within range
+            Vec3 eyePos = p.position;
+            eyePos.y += PLAYER_EYE_HEIGHT;
+            int spotted = 0;
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                if (g_players[i].state != PlayerState::ALIVE) continue;
+                if (g_players[i].teamId == p.teamId) continue;
+                float d = (g_players[i].position - p.position).length();
+                if (d < 80.0f && canSeePlayer(playerId, i)) {
+                    g_players[i].spotted = true;
+                    g_players[i].spottedTimer = 8.0f;
+                    spotted++;
+                }
+            }
+            printf("Player %d spotted %d enemies!\n", playerId, spotted);
+            break;
+        }
+        default: break;
     }
 }
 
@@ -1498,9 +1631,12 @@ static void spawnBots(int count) {
         // Assign team (alternating)
         g_players[slot].teamId = g_nextTeam;
         g_nextTeam = (g_nextTeam + 1) % 2;
+        // Random class
+        g_players[slot].playerClass = (PlayerClass)(rand() % (int)PlayerClass::COUNT);
+        const auto& cdef = getClassDef(g_players[slot].playerClass);
         snprintf(g_players[slot].name, sizeof(g_players[slot].name), "Bot_%d", i + 1);
-        g_players[slot].currentWeapon = WeaponType::PISTOL;
-        g_players[slot].ammo = getWeaponDef(WeaponType::PISTOL).magSize;
+        g_players[slot].currentWeapon = cdef.primaryWeapon;
+        g_players[slot].ammo = getWeaponDef(cdef.primaryWeapon).magSize;
         spawnPlayer(slot);
 
         g_bots[i].playerId = slot;
@@ -1637,8 +1773,17 @@ int main(int argc, char** argv) {
                     } else {
                         enterVehicle(i);
                     }
-                    // Clear KEY_USE to avoid rapid toggle
                     input->keys &= ~InputState::KEY_USE;
+                }
+
+                // Ability cooldown
+                if (g_players[i].abilityCooldown > 0)
+                    g_players[i].abilityCooldown -= TICK_DURATION;
+
+                // Process class ability (Q key)
+                if (input->keys & InputState::KEY_ABILITY) {
+                    processAbility(i, *input);
+                    input->keys &= ~InputState::KEY_ABILITY;
                 }
 
                 // Only tick player movement if NOT in vehicle
@@ -1651,6 +1796,14 @@ int main(int argc, char** argv) {
                     }
                 }
                 // In vehicle: shooting is handled by tickVehicles
+            }
+
+            // Spotted timer
+            if (g_players[i].spotted) {
+                g_players[i].spottedTimer -= TICK_DURATION;
+                if (g_players[i].spottedTimer <= 0) {
+                    g_players[i].spotted = false;
+                }
             }
         }
 

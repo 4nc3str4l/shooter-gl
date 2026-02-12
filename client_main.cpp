@@ -91,6 +91,10 @@ static float g_hitMarkerTimer = 0;
 static float g_damageFlashTimer = 0;
 static int   g_lastHealth = MAX_HEALTH;
 
+// Class selection
+static uint8_t g_pendingClassSelect = 0xFF; // No pending change
+static PlayerClass g_selectedClass = PlayerClass::ASSAULT;
+
 // Footprint tracking
 static float g_footstepAccum = 0;
 static bool  g_footIsLeft = false;
@@ -223,6 +227,14 @@ static void keyCallback(GLFWwindow* window, int key, int, int action, int) {
     if (key == GLFW_KEY_TAB) {
         g_showScoreboard = (action == GLFW_PRESS || action == GLFW_REPEAT);
     }
+
+    // Class selection (1-4 keys)
+    if (action == GLFW_PRESS) {
+        if (key == GLFW_KEY_1) { g_pendingClassSelect = 0; g_selectedClass = PlayerClass::ASSAULT; }
+        if (key == GLFW_KEY_2) { g_pendingClassSelect = 1; g_selectedClass = PlayerClass::ENGINEER; }
+        if (key == GLFW_KEY_3) { g_pendingClassSelect = 2; g_selectedClass = PlayerClass::SUPPORT; }
+        if (key == GLFW_KEY_4) { g_pendingClassSelect = 3; g_selectedClass = PlayerClass::RECON; }
+    }
 }
 
 // ============================================================================
@@ -241,6 +253,8 @@ static void sendInput() {
     pkt.keys = g_currentInput.keys;
     pkt.yaw = g_yaw;
     pkt.pitch = g_pitch;
+    pkt.classSelect = g_pendingClassSelect;
+    if (g_pendingClassSelect != 0xFF) g_pendingClassSelect = 0xFF; // Send once
     g_socket.sendTo(&pkt, sizeof(pkt), g_serverAddr);
 }
 
@@ -302,6 +316,8 @@ static void receivePackets() {
                     g_players[pid].ammo = np.ammo;
                     g_players[pid].teamId = np.teamId;
                     g_players[pid].vehicleId = np.vehicleId;
+                    g_players[pid].playerClass = (PlayerClass)np.playerClass;
+                    g_players[pid].spotted = np.spotted != 0;
 
                     if (pid != g_localId) {
                         g_players[pid].yaw = np.yaw;
@@ -431,6 +447,7 @@ static void captureInput() {
     if (glfwGetMouseButton(g_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
         g_currentInput.keys |= InputState::KEY_SHOOT;
     if (glfwGetKey(g_window, GLFW_KEY_R) == GLFW_PRESS)     g_currentInput.keys |= InputState::KEY_RELOAD;
+    if (glfwGetKey(g_window, GLFW_KEY_Q) == GLFW_PRESS)     g_currentInput.keys |= InputState::KEY_ABILITY;
     // E key for vehicle enter/exit (toggle, send once per press)
     bool eDown = glfwGetKey(g_window, GLFW_KEY_E) == GLFW_PRESS;
     if (eDown && !g_usePressed) g_currentInput.keys |= InputState::KEY_USE;
@@ -806,6 +823,68 @@ int main(int, char**) {
                         g_players[g_localId].ammo,
                         g_players[g_localId].currentWeapon,
                         g_screenW, g_screenH);
+                }
+
+                // Class HUD
+                if (g_localId >= 0) {
+                    const auto& cdef = getClassDef(g_players[g_localId].playerClass);
+                    char classBuf[96];
+                    snprintf(classBuf, sizeof(classBuf), "[%s] %s  [Q] %s",
+                             cdef.name, cdef.passiveDesc, cdef.abilityName);
+                    g_renderer.drawText(classBuf, 10, 40, 2.0f, {0.8f, 0.8f, 0.6f},
+                                        g_screenW, g_screenH);
+
+                    // Ability cooldown bar
+                    float cd = g_players[g_localId].abilityCooldown;
+                    if (cd > 0) {
+                        float maxCd = cdef.abilityCooldown;
+                        float frac = cd / maxCd;
+                        g_renderer.drawRect(10, 25, 200 * (1.0f - frac), 8,
+                                            {0.2f, 0.8f, 0.3f}, 0.8f, g_screenW, g_screenH);
+                        g_renderer.drawRect(10 + 200 * (1.0f - frac), 25, 200 * frac, 8,
+                                            {0.3f, 0.3f, 0.3f}, 0.5f, g_screenW, g_screenH);
+                    } else {
+                        g_renderer.drawRect(10, 25, 200, 8,
+                                            {0.2f, 0.8f, 0.3f}, 0.8f, g_screenW, g_screenH);
+                        g_renderer.drawText("READY", 215, 22, 1.5f, {0.3f, 1, 0.3f},
+                                            g_screenW, g_screenH);
+                    }
+
+                    // Class selection hint
+                    g_renderer.drawText("[1]Assault [2]Engineer [3]Support [4]Recon",
+                                        10, 8, 1.5f, {0.5f, 0.5f, 0.5f}, g_screenW, g_screenH);
+                }
+
+                // Spotted enemy markers (3D → screen projection)
+                if (g_localId >= 0) {
+                    for (int i = 0; i < MAX_PLAYERS; i++) {
+                        if (i == g_localId) continue;
+                        if (!g_players[i].spotted) continue;
+                        if (g_players[i].state != PlayerState::ALIVE) continue;
+                        if (g_players[i].teamId == g_players[g_localId].teamId) continue;
+
+                        // Simple distance-based marker (above player head)
+                        Vec3 diff = g_players[i].position - g_players[g_localId].position;
+                        float dist = diff.length();
+                        if (dist > 0.1f && dist < 100.0f) {
+                            // Approximate screen position (simplified)
+                            Vec3 dir = diff * (1.0f / dist);
+                            float dotFwd = sinf(g_yaw) * dir.x + cosf(g_yaw) * dir.z;
+                            if (dotFwd > 0) {
+                                float dotRight = cosf(g_yaw) * dir.x - sinf(g_yaw) * dir.z;
+                                float sx = g_screenW * 0.5f + (dotRight / dotFwd) * g_screenW * 0.5f;
+                                float sy = g_screenH * 0.5f - ((dir.y + PLAYER_HEIGHT / dist) / dotFwd) * g_screenH * 0.5f;
+                                sx = std::clamp(sx, 20.0f, (float)g_screenW - 20.0f);
+                                sy = std::clamp(sy, 20.0f, (float)g_screenH - 20.0f);
+                                char distBuf[16];
+                                snprintf(distBuf, sizeof(distBuf), "%.0fm", dist);
+                                g_renderer.drawText("!", sx - 4, sy, 3.0f, {1, 0.3f, 0.2f},
+                                                    g_screenW, g_screenH);
+                                g_renderer.drawText(distBuf, sx - 10, sy - 15, 1.5f, {1, 0.5f, 0.3f},
+                                                    g_screenW, g_screenH);
+                            }
+                        }
+                    }
                 }
 
                 // CTF HUD: team scores and flag status

@@ -216,7 +216,7 @@ constexpr float  VEHICLE_ENTER_RANGE = 3.5f;
 // ============================================================================
 
 enum class WeaponType : uint8_t {
-    NONE = 0, PISTOL, SHOTGUN, RIFLE, SNIPER, COUNT
+    NONE = 0, PISTOL, SHOTGUN, RIFLE, SNIPER, SMG, LMG, ROCKET, COUNT
 };
 
 struct WeaponDef {
@@ -236,8 +236,48 @@ inline const WeaponDef& getWeaponDef(WeaponType t) {
         {"Shotgun", 12,  8, 0.8f,  0.08f,   8, 30.0f},
         {"Rifle",   30, 30, 0.1f,  0.02f,   1, 300.0f},
         {"Sniper",  90,  5, 1.2f,  0.002f,  1, 500.0f},
+        {"SMG",     18, 35, 0.07f, 0.035f,  1, 150.0f},
+        {"LMG",     22,100, 0.09f, 0.04f,   1, 250.0f},
+        {"Rocket", 120,  4, 2.5f,  0.01f,   1, 400.0f},
     };
     return defs[static_cast<int>(t)];
+}
+
+// ============================================================================
+// Player Classes
+// ============================================================================
+
+enum class PlayerClass : uint8_t {
+    ASSAULT = 0, ENGINEER, SUPPORT, RECON, COUNT
+};
+
+enum class AbilityType : uint8_t {
+    NONE = 0,
+    FRAG_GRENADE,    // Assault: throwable explosive
+    ROCKET_LAUNCHER, // Engineer: anti-vehicle rocket
+    AMMO_DROP,       // Support: drop ammo box
+    SPOT_ENEMIES,    // Recon: reveal enemy positions
+};
+
+struct ClassDef {
+    const char* name;
+    WeaponType  primaryWeapon;
+    AbilityType ability;
+    const char* abilityName;
+    float       abilityCooldown; // Seconds
+    float       speedMult;       // Movement speed multiplier
+    int         extraHealth;     // Bonus HP
+    const char* passiveDesc;
+};
+
+inline const ClassDef& getClassDef(PlayerClass c) {
+    static const ClassDef defs[] = {
+        {"Assault",  WeaponType::RIFLE,  AbilityType::FRAG_GRENADE,    "Frag Grenade", 8.0f, 1.1f,  0, "+10% Speed"},
+        {"Engineer", WeaponType::SMG,    AbilityType::ROCKET_LAUNCHER, "Rocket",       10.0f, 1.0f,  0, "Repair Vehicles"},
+        {"Support",  WeaponType::LMG,    AbilityType::AMMO_DROP,       "Ammo Drop",    12.0f, 0.9f, 25, "+25 HP Armor"},
+        {"Recon",    WeaponType::SNIPER, AbilityType::SPOT_ENEMIES,    "Spot",          5.0f, 1.0f,  0, "Enemy Markers"},
+    };
+    return defs[static_cast<int>(c)];
 }
 
 // ============================================================================
@@ -264,6 +304,7 @@ struct InputState {
     static constexpr uint16_t KEY_USE    = 0x80;  // Enter/exit vehicle
     static constexpr uint16_t KEY_UP     = 0x100; // Helicopter ascend (Space while in heli)
     static constexpr uint16_t KEY_DOWN   = 0x200; // Helicopter descend (Ctrl while in heli)
+    static constexpr uint16_t KEY_ABILITY= 0x400; // Q key: use class ability
 };
 
 struct PlayerData {
@@ -281,6 +322,10 @@ struct PlayerData {
     bool        isBot = false;
     int16_t     vehicleId = -1;    // -1 = on foot, >=0 = in vehicle
     bool        isDriver = false;
+    PlayerClass playerClass = PlayerClass::ASSAULT;
+    float       abilityCooldown = 0;
+    bool        spotted = false;   // Recon spot marker
+    float       spottedTimer = 0;  // Time remaining for spot
 };
 
 // ============================================================================

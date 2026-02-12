@@ -742,18 +742,21 @@ void tickPlayer(PlayerData& p, const InputState& input, const GameMap& map, floa
     Vec3 wishDir = forward * fwd + right * side;
     if (wishDir.lengthSq() > 0.01f) wishDir = wishDir.normalize();
 
+    // Apply class speed multiplier
+    float speed = PLAYER_SPEED * getClassDef(p.playerClass).speedMult;
+
     bool onGround = map.isOnGround(p.position, PLAYER_RADIUS, PLAYER_HEIGHT);
 
     if (onGround) {
-        p.velocity.x = wishDir.x * PLAYER_SPEED;
-        p.velocity.z = wishDir.z * PLAYER_SPEED;
+        p.velocity.x = wishDir.x * speed;
+        p.velocity.z = wishDir.z * speed;
         if (input.keys & InputState::KEY_JUMP) {
             p.velocity.y = JUMP_VELOCITY;
         }
     } else {
         // Air control (limited)
-        p.velocity.x += wishDir.x * PLAYER_SPEED * 0.05f * dt * 60.0f;
-        p.velocity.z += wishDir.z * PLAYER_SPEED * 0.05f * dt * 60.0f;
+        p.velocity.x += wishDir.x * speed * 0.05f * dt * 60.0f;
+        p.velocity.z += wishDir.z * speed * 0.05f * dt * 60.0f;
     }
 
     // Gravity
