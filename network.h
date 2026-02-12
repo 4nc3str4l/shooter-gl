@@ -68,6 +68,7 @@ struct NetPlayerState {
     uint8_t  weapon = 0;
     uint8_t  ammo = 0;
     int16_t  vehicleId = -1;
+    uint8_t  teamId = 0;
 };
 
 // Per-vehicle state in snapshot
@@ -76,10 +77,28 @@ struct NetVehicleState {
     uint8_t  type = 0;
     float    x = 0, y = 0, z = 0;
     float    yaw = 0;
+    float    pitch = 0;
     float    turretYaw = 0;
     int16_t  health = 0;
     int16_t  driverId = -1;
     uint8_t  active = 1;
+    float    rotorAngle = 0;
+};
+
+// Per-flag state in snapshot
+struct NetFlagState {
+    uint8_t  teamId = 0;
+    float    x = 0, y = 0, z = 0;
+    int16_t  carrierId = -1;
+    uint8_t  atBase = 1;
+};
+
+// Per-tornado state in snapshot
+struct NetTornadoState {
+    float    x = 0, y = 0, z = 0;
+    float    radius = 15.0f;
+    float    rotation = 0;
+    uint8_t  active = 0;
 };
 
 // Per-weapon-pickup state in snapshot
@@ -96,11 +115,15 @@ struct SnapshotPacket {
     uint32_t serverTick = 0;
     uint32_t ackInputSeq = 0;
     uint8_t  numPlayers = 0;
+    uint8_t  teamScores[2] = {0, 0}; // CTF scores
     // Followed by: NetPlayerState[numPlayers]
     // Then: uint8_t numWeapons
     // Then: NetWeaponState[numWeapons]
     // Then: uint8_t numVehicles
     // Then: NetVehicleState[numVehicles]
+    // Then: 2x NetFlagState (team 0, team 1)
+    // Then: uint8_t numTornados
+    // Then: NetTornadoState[numTornados]
 };
 
 // Server -> Client: Hit notification

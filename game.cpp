@@ -68,6 +68,8 @@ void GameMap::addBuilding(float x, float z, float w, float d, float h,
 void GameMap::buildArcticMap() {
     blocks_.clear();
     spawns_.clear();
+    teamSpawns_[0].clear();
+    teamSpawns_[1].clear();
     pickups_.clear();
     waypoints_.clear();
     vehicleSpawns_.clear();
@@ -388,6 +390,43 @@ void GameMap::buildArcticMap() {
     // Zone B/C
     vehicleSpawns_.push_back({{80, 0.1f, -100}, PI, VehicleType::TANK});
     vehicleSpawns_.push_back({{-80, 0.1f, 130}, 0, VehicleType::TANK});
+
+    // Helicopters (airfield and military base)
+    vehicleSpawns_.push_back({{140, 0.1f, 120}, 0, VehicleType::HELICOPTER});
+    vehicleSpawns_.push_back({{160, 0.1f, 120}, 0, VehicleType::HELICOPTER});
+    vehicleSpawns_.push_back({{-130, 0.1f, -120}, 0, VehicleType::HELICOPTER});
+    // Planes (airfield runway)
+    vehicleSpawns_.push_back({{120, 0.1f, 105}, PI*0.25f, VehicleType::PLANE});
+    vehicleSpawns_.push_back({{170, 0.1f, 105}, PI*0.25f, VehicleType::PLANE});
+
+    // === TEAM SPAWNS (west=team0/red, east=team1/blue) ===
+    // Team 0 (Red) - west side spawns
+    teamSpawns_[0].push_back({{-150, 0.1f, -20}, 0.0f});
+    teamSpawns_[0].push_back({{-150, 0.1f, 0}, 0.0f});
+    teamSpawns_[0].push_back({{-150, 0.1f, 20}, 0.0f});
+    teamSpawns_[0].push_back({{-140, 0.1f, -10}, 0.2f});
+    teamSpawns_[0].push_back({{-140, 0.1f, 10}, -0.2f});
+    teamSpawns_[0].push_back({{-160, 0.1f, 0}, 0.0f});
+    teamSpawns_[0].push_back({{-160, 0.1f, -15}, 0.3f});
+    teamSpawns_[0].push_back({{-160, 0.1f, 15}, -0.3f});
+    // Team 1 (Blue) - east side spawns
+    teamSpawns_[1].push_back({{150, 0.1f, -20}, PI});
+    teamSpawns_[1].push_back({{150, 0.1f, 0}, PI});
+    teamSpawns_[1].push_back({{150, 0.1f, 20}, PI});
+    teamSpawns_[1].push_back({{140, 0.1f, -10}, PI+0.2f});
+    teamSpawns_[1].push_back({{140, 0.1f, 10}, PI-0.2f});
+    teamSpawns_[1].push_back({{160, 0.1f, 0}, PI});
+    teamSpawns_[1].push_back({{160, 0.1f, -15}, PI+0.3f});
+    teamSpawns_[1].push_back({{160, 0.1f, 15}, PI-0.3f});
+
+    // === FLAG BASE POSITIONS ===
+    flagBasePos_[0] = {-170, 0.5f, 0}; // Red flag (west)
+    flagBasePos_[1] = {170, 0.5f, 0};  // Blue flag (east)
+
+    // Add flag base platforms
+    addBlock({-173, 0.0f, -3}, {-167, 0.3f, 3}, red, true);   // Red base platform
+    Vec3 blue = {0.15f, 0.20f, 0.65f};
+    addBlock({167, 0.0f, -3}, {173, 0.3f, 3}, blue, true);    // Blue base platform
 
     // === WAYPOINTS for bot navigation (many more for big map) ===
     auto addWP = [&](float x, float y, float z) -> int {

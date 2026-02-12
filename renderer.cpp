@@ -739,9 +739,15 @@ void Renderer::renderPlayer(const PlayerData& p, bool isLocalPlayer) {
     Vec3 pos = p.position;
 
     // Team colors
-    Vec3 bodyColor = {0.2f, 0.35f, 0.6f};  // Blue team look
+    Vec3 bodyColor, legColor;
     Vec3 skinColor = {0.85f, 0.72f, 0.6f};
-    Vec3 legColor  = {0.25f, 0.25f, 0.3f};
+    if (p.teamId == 0) {
+        bodyColor = {0.7f, 0.2f, 0.15f};  // Red team
+        legColor  = {0.35f, 0.18f, 0.15f};
+    } else {
+        bodyColor = {0.2f, 0.35f, 0.7f};  // Blue team
+        legColor  = {0.15f, 0.2f, 0.35f};
+    }
 
     // Torso
     Mat4 torso = Mat4::translate({pos.x, pos.y + 0.9f, pos.z}) *
@@ -1495,6 +1501,111 @@ void Renderer::renderVehicle(const VehicleData& v, float time) {
                        Mat4::scale({0.1f, 0.1f, 2.0f});
         drawCube(rollBar, darkBar);
 
+    } else if (v.type == VehicleType::HELICOPTER) {
+        Vec3 bodyColor = {0.25f, 0.28f, 0.30f}; // Dark gray
+        Vec3 tailColor = {0.22f, 0.25f, 0.28f};
+        Vec3 rotorColor = {0.15f, 0.15f, 0.15f};
+        Vec3 glassColor = {0.3f, 0.5f, 0.7f};
+
+        // Fuselage
+        Mat4 fuselage = base * Mat4::translate({0.0f, 1.5f, 0.0f}) *
+                        Mat4::scale({5.0f, 1.6f, 2.0f});
+        drawCube(fuselage, bodyColor);
+
+        // Cockpit glass
+        Mat4 cockpit = base * Mat4::translate({2.2f, 1.8f, 0.0f}) *
+                       Mat4::scale({1.5f, 1.0f, 1.6f});
+        drawCube(cockpit, glassColor);
+
+        // Tail boom
+        Mat4 tail = base * Mat4::translate({-4.0f, 1.8f, 0.0f}) *
+                    Mat4::scale({4.0f, 0.5f, 0.5f});
+        drawCube(tail, tailColor);
+
+        // Tail fin (vertical)
+        Mat4 tailFin = base * Mat4::translate({-5.8f, 2.5f, 0.0f}) *
+                       Mat4::scale({0.8f, 1.2f, 0.1f});
+        drawCube(tailFin, bodyColor);
+
+        // Tail rotor (small horizontal disc)
+        Mat4 tailRotor = base * Mat4::translate({-5.8f, 2.5f, 0.3f}) *
+                         Mat4::rotateY(v.rotorAngle * 3.0f) *
+                         Mat4::scale({0.1f, 0.6f, 0.6f});
+        drawCube(tailRotor, rotorColor);
+
+        // Main rotor (spinning blades on top) - 2 blades
+        Mat4 rotorHub = base * Mat4::translate({0.0f, 2.8f, 0.0f});
+        for (int b = 0; b < 2; b++) {
+            float angle = v.rotorAngle + b * PI;
+            Mat4 blade = rotorHub * Mat4::rotateY(angle) *
+                         Mat4::translate({3.0f, 0.0f, 0.0f}) *
+                         Mat4::scale({6.0f, 0.05f, 0.3f});
+            drawCube(blade, rotorColor);
+        }
+
+        // Skids (landing gear)
+        for (float side : {-1.0f, 1.0f}) {
+            Mat4 skid = base * Mat4::translate({0.0f, 0.15f, side * 1.0f}) *
+                        Mat4::scale({4.0f, 0.1f, 0.1f});
+            drawCube(skid, {0.1f, 0.1f, 0.1f});
+            // Skid struts
+            Mat4 strut = base * Mat4::translate({0.8f, 0.75f, side * 0.8f}) *
+                         Mat4::scale({0.1f, 1.2f, 0.1f});
+            drawCube(strut, {0.1f, 0.1f, 0.1f});
+        }
+
+    } else if (v.type == VehicleType::PLANE) {
+        // Apply pitch rotation for planes
+        Mat4 planeBase = Mat4::translate(pos) * Mat4::rotateY(-v.yaw) * Mat4::rotateX(v.pitch);
+
+        Vec3 bodyColor = {0.6f, 0.6f, 0.62f}; // Light gray
+        Vec3 wingColor = {0.55f, 0.55f, 0.58f};
+        Vec3 engineColor = {0.3f, 0.3f, 0.3f};
+        Vec3 glassColor = {0.3f, 0.5f, 0.7f};
+        Vec3 propColor = {0.15f, 0.15f, 0.15f};
+
+        // Fuselage
+        Mat4 fuselage = planeBase * Mat4::translate({0.0f, 0.0f, 0.0f}) *
+                        Mat4::scale({7.0f, 1.2f, 1.2f});
+        drawCube(fuselage, bodyColor);
+
+        // Cockpit
+        Mat4 cockpit = planeBase * Mat4::translate({2.0f, 0.7f, 0.0f}) *
+                       Mat4::scale({1.5f, 0.8f, 1.0f});
+        drawCube(cockpit, glassColor);
+
+        // Main wings
+        Mat4 wingL = planeBase * Mat4::translate({0.0f, -0.1f, -4.0f}) *
+                     Mat4::scale({3.0f, 0.15f, 4.0f});
+        drawCube(wingL, wingColor);
+        Mat4 wingR = planeBase * Mat4::translate({0.0f, -0.1f, 4.0f}) *
+                     Mat4::scale({3.0f, 0.15f, 4.0f});
+        drawCube(wingR, wingColor);
+
+        // Tail wing (horizontal stabilizer)
+        Mat4 tailWing = planeBase * Mat4::translate({-3.2f, 0.2f, 0.0f}) *
+                        Mat4::scale({1.0f, 0.1f, 2.5f});
+        drawCube(tailWing, wingColor);
+
+        // Vertical tail
+        Mat4 vTail = planeBase * Mat4::translate({-3.2f, 1.0f, 0.0f}) *
+                     Mat4::scale({1.0f, 1.2f, 0.1f});
+        drawCube(vTail, wingColor);
+
+        // Engine nacelle
+        Mat4 engine = planeBase * Mat4::translate({3.5f, 0.0f, 0.0f}) *
+                      Mat4::scale({1.0f, 0.7f, 0.7f});
+        drawCube(engine, engineColor);
+
+        // Propeller (spinning)
+        for (int b = 0; b < 2; b++) {
+            float angle = v.rotorAngle + b * PI;
+            Mat4 prop = planeBase * Mat4::translate({4.2f, 0.0f, 0.0f}) *
+                        Mat4::rotateX(angle) *
+                        Mat4::scale({0.05f, 1.5f, 0.2f});
+            drawCube(prop, propColor);
+        }
+
     } else if (v.type == VehicleType::TANK) {
         Vec3 darkGreen   = {0.2f, 0.3f, 0.15f};
         Vec3 turretColor = {0.22f, 0.32f, 0.17f};
@@ -1527,5 +1638,91 @@ void Renderer::renderVehicle(const VehicleData& v, float time) {
         Mat4 barrel = turretBase * Mat4::translate({3.0f, 2.0f, 0.0f}) *
                       Mat4::scale({3.0f, 0.2f, 0.2f});
         drawCube(barrel, barrelColor);
+    }
+}
+
+// ============================================================================
+// CTF Flag Rendering
+// ============================================================================
+
+void Renderer::renderFlag(const FlagData& flag, int teamId, float time) {
+    Vec3 flagColor = teamId == 0 ? Vec3{1.0f, 0.15f, 0.1f} : Vec3{0.1f, 0.3f, 1.0f};
+    Vec3 poleColor = {0.5f, 0.5f, 0.5f};
+
+    Vec3 pos = flag.position;
+
+    // Pole
+    Mat4 pole = Mat4::translate({pos.x, pos.y + 1.5f, pos.z}) *
+                Mat4::scale({0.06f, 3.0f, 0.06f});
+    drawCube(pole, poleColor);
+
+    // Flag fabric (waving)
+    float wave = sinf(time * 3.0f + pos.x) * 0.15f;
+    Mat4 fabric = Mat4::translate({pos.x + 0.5f + wave, pos.y + 2.5f, pos.z}) *
+                  Mat4::rotateY(wave) *
+                  Mat4::scale({1.0f, 0.6f, 0.05f});
+    drawCube(fabric, flagColor);
+
+    // Glow ring at base (pulsing)
+    float pulse = 0.5f + 0.5f * sinf(time * 4.0f);
+    Vec3 glowColor = flagColor * pulse;
+    Mat4 glow = Mat4::translate({pos.x, pos.y + 0.05f, pos.z}) *
+                Mat4::scale({1.5f, 0.05f, 1.5f});
+    drawCube(glow, glowColor);
+}
+
+// ============================================================================
+// Tornado Rendering
+// ============================================================================
+
+void Renderer::renderTornado(const TornadoData& tornado, float time) {
+    Vec3 pos = tornado.position;
+    float rot = tornado.rotation;
+
+    // Tornado funnel: stack of progressively smaller rings
+    int layers = 12;
+    for (int i = 0; i < layers; i++) {
+        float t = (float)i / layers;
+        float height = t * 40.0f;       // Tornado reaches 40 units high
+        float radius = tornado.radius * (0.3f + 0.7f * (1.0f - t)); // Wider at base
+        float layerRot = rot + t * 3.0f + time * (2.0f + t * 3.0f);
+
+        // 4 debris cubes per layer spinning around
+        for (int j = 0; j < 4; j++) {
+            float angle = layerRot + j * PI * 0.5f;
+            float cx = pos.x + cosf(angle) * radius;
+            float cz = pos.z + sinf(angle) * radius;
+            float cy = pos.y + height;
+
+            // Brownish debris color with variation
+            float gray = 0.35f + 0.15f * sinf(angle + time);
+            Vec3 debrisColor = {gray + 0.1f, gray, gray - 0.05f};
+
+            float cubeSize = 0.5f + 0.8f * (1.0f - t);
+            Mat4 model = Mat4::translate({cx, cy, cz}) *
+                         Mat4::rotateY(angle * 2) *
+                         Mat4::rotateX(time * 3.0f + j) *
+                         Mat4::scale({cubeSize, cubeSize, cubeSize});
+            drawCube(model, debrisColor);
+        }
+
+        // Central column (dusty)
+        float colRadius = radius * 0.3f;
+        Vec3 dustColor = {0.5f, 0.45f, 0.35f};
+        float alpha = 0.4f * (1.0f - t);
+        Mat4 column = Mat4::translate({pos.x, pos.y + height, pos.z}) *
+                      Mat4::rotateY(layerRot) *
+                      Mat4::scale({colRadius, 3.5f, colRadius});
+        drawCube(column, dustColor * alpha);
+    }
+
+    // Ground dust ring
+    for (int j = 0; j < 8; j++) {
+        float angle = rot * 0.5f + j * PI * 0.25f + time * 1.5f;
+        float r = tornado.radius * 1.1f;
+        Mat4 dust = Mat4::translate({pos.x + cosf(angle) * r, pos.y + 0.3f, pos.z + sinf(angle) * r}) *
+                    Mat4::rotateY(angle) *
+                    Mat4::scale({1.5f, 0.3f, 1.5f});
+        drawCube(dust, {0.6f, 0.55f, 0.45f});
     }
 }

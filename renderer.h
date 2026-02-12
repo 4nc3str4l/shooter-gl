@@ -89,6 +89,12 @@ public:
     // Vehicles
     void renderVehicle(const VehicleData& v, float time = 0);
 
+    // CTF flags
+    void renderFlag(const FlagData& flag, int teamId, float time);
+
+    // Tornados
+    void renderTornado(const TornadoData& tornado, float time);
+
     // Text rendering
     void drawText(const char* text, float x, float y, float scale,
                   const Vec3& color, int screenW, int screenH);

@@ -43,6 +43,14 @@ static VehicleData g_vehicles[MAX_VEHICLES];
 static int g_numVehicles = 0;
 static bool g_usePressed = false; // For toggle behavior
 
+// CTF state
+static FlagData g_flags[2];
+static int g_teamScores[2] = {0, 0};
+
+// Tornado state
+static TornadoData g_tornados[MAX_TORNADOS];
+static int g_numTornados = 0;
+
 // View angles
 static float g_yaw = 0, g_pitch = 0;
 static double g_lastMouseX = 0, g_lastMouseY = 0;
@@ -248,7 +256,7 @@ static void addKillFeedEntry(const char* text) {
 }
 
 static void receivePackets() {
-    uint8_t buf[8192];
+    uint8_t buf[16384];
     sockaddr_in fromAddr;
     int len;
 
@@ -276,6 +284,8 @@ static void receivePackets() {
                 if (len < (int)sizeof(hdr)) break;
                 memcpy(&hdr, buf, sizeof(hdr));
                 offset += sizeof(hdr);
+                g_teamScores[0] = hdr.teamScores[0];
+                g_teamScores[1] = hdr.teamScores[1];
 
                 for (uint8_t i = 0; i < hdr.numPlayers && offset + (int)sizeof(NetPlayerState) <= len; i++) {
                     NetPlayerState np;
@@ -290,6 +300,8 @@ static void receivePackets() {
                     g_players[pid].health = np.health;
                     g_players[pid].currentWeapon = (WeaponType)np.weapon;
                     g_players[pid].ammo = np.ammo;
+                    g_players[pid].teamId = np.teamId;
+                    g_players[pid].vehicleId = np.vehicleId;
 
                     if (pid != g_localId) {
                         g_players[pid].yaw = np.yaw;
@@ -324,12 +336,45 @@ static void receivePackets() {
                             g_vehicles[nv.id].type = (VehicleType)nv.type;
                             g_vehicles[nv.id].position = {nv.x, nv.y, nv.z};
                             g_vehicles[nv.id].yaw = nv.yaw;
+                            g_vehicles[nv.id].pitch = nv.pitch;
                             g_vehicles[nv.id].turretYaw = nv.turretYaw;
                             g_vehicles[nv.id].health = nv.health;
                             g_vehicles[nv.id].driverId = nv.driverId;
                             g_vehicles[nv.id].active = nv.active != 0;
+                            g_vehicles[nv.id].rotorAngle = nv.rotorAngle;
                         }
                     }
+                }
+
+                // Flag states
+                for (int t = 0; t < 2 && offset + (int)sizeof(NetFlagState) <= len; t++) {
+                    NetFlagState nf;
+                    memcpy(&nf, buf + offset, sizeof(nf));
+                    offset += sizeof(nf);
+                    g_flags[t].position = {nf.x, nf.y, nf.z};
+                    g_flags[t].carrierId = nf.carrierId;
+                    g_flags[t].atBase = nf.atBase != 0;
+                }
+
+                // Tornado states
+                if (offset + 1 <= len) {
+                    uint8_t numTornados = buf[offset++];
+                    g_numTornados = numTornados;
+                    int ti = 0;
+                    for (uint8_t i = 0; i < numTornados && offset + (int)sizeof(NetTornadoState) <= len; i++) {
+                        NetTornadoState nt;
+                        memcpy(&nt, buf + offset, sizeof(nt));
+                        offset += sizeof(nt);
+                        if (ti < MAX_TORNADOS) {
+                            g_tornados[ti].position = {nt.x, nt.y, nt.z};
+                            g_tornados[ti].radius = nt.radius;
+                            g_tornados[ti].rotation = nt.rotation;
+                            g_tornados[ti].active = nt.active != 0;
+                            ti++;
+                        }
+                    }
+                    // Mark remaining as inactive
+                    for (; ti < MAX_TORNADOS; ti++) g_tornados[ti].active = false;
                 }
 
                 // Update local player state from server
@@ -390,6 +435,22 @@ static void captureInput() {
     bool eDown = glfwGetKey(g_window, GLFW_KEY_E) == GLFW_PRESS;
     if (eDown && !g_usePressed) g_currentInput.keys |= InputState::KEY_USE;
     g_usePressed = eDown;
+    // Helicopter/plane vertical controls
+    if (g_localId >= 0 && g_players[g_localId].vehicleId >= 0) {
+        int vid = g_players[g_localId].vehicleId;
+        if (vid < g_numVehicles) {
+            VehicleType vt = g_vehicles[vid].type;
+            if (vt == VehicleType::HELICOPTER || vt == VehicleType::PLANE) {
+                // Space = ascend/pitch up, Ctrl = descend/pitch down
+                if (glfwGetKey(g_window, GLFW_KEY_SPACE) == GLFW_PRESS)
+                    g_currentInput.keys |= InputState::KEY_UP;
+                if (glfwGetKey(g_window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
+                    g_currentInput.keys |= InputState::KEY_DOWN;
+                // Override jump bit for vehicles (space used for ascend instead)
+                g_currentInput.keys &= ~InputState::KEY_JUMP;
+            }
+        }
+    }
 
     g_currentInput.yaw = g_yaw;
     g_currentInput.pitch = g_pitch;
@@ -566,42 +627,64 @@ int main(int, char**) {
                 if (g_localId >= 0 && g_localId < MAX_PLAYERS &&
                     g_players[g_localId].state == PlayerState::ALIVE) {
 
-                    if ((g_currentInput.keys & InputState::KEY_SHOOT) &&
-                        g_localFireCooldown <= 0 && g_players[g_localId].ammo > 0) {
-                        const auto& def = getWeaponDef(g_players[g_localId].currentWeapon);
-                        g_localFireCooldown = def.fireRate;
-                        g_muzzleFlashTimer = 0.06f;
+                    bool inVehicle = g_players[g_localId].vehicleId >= 0;
+                    bool canShoot = false;
 
-                        // Client-side hit prediction (for hit marker)
+                    if (inVehicle) {
+                        // Vehicle shooting: check vehicle cannon
+                        int vid = g_players[g_localId].vehicleId;
+                        if (vid >= 0 && vid < g_numVehicles) {
+                            const auto& vdef = getVehicleDef(g_vehicles[vid].type);
+                            canShoot = (g_currentInput.keys & InputState::KEY_SHOOT) &&
+                                       g_localFireCooldown <= 0 && vdef.cannonDamage > 0;
+                            if (canShoot) {
+                                g_localFireCooldown = vdef.cannonRate;
+                                g_muzzleFlashTimer = 0.1f;
+                            }
+                        }
+                    } else {
+                        // On-foot shooting
+                        canShoot = (g_currentInput.keys & InputState::KEY_SHOOT) &&
+                                   g_localFireCooldown <= 0 && g_players[g_localId].ammo > 0;
+                        if (canShoot) {
+                            const auto& def = getWeaponDef(g_players[g_localId].currentWeapon);
+                            g_localFireCooldown = def.fireRate;
+                            g_muzzleFlashTimer = 0.06f;
+                        }
+                    }
+
+                    if (canShoot) {
+                        float range = inVehicle ? 500.0f :
+                            getWeaponDef(g_players[g_localId].currentWeapon).range;
+
                         Vec3 eyePos = g_players[g_localId].position;
-                        eyePos.y += PLAYER_EYE_HEIGHT;
+                        eyePos.y += inVehicle ? 2.5f : PLAYER_EYE_HEIGHT;
                         Vec3 dir = {
                             sinf(g_yaw) * cosf(g_pitch),
                             sinf(g_pitch),
                             cosf(g_yaw) * cosf(g_pitch)
                         };
                         dir = dir.normalize();
-                        float playerDist = def.range;
-                        int hitP = GameMap::raycastPlayers(eyePos, dir, def.range,
+                        float playerDist = range;
+                        int hitP = GameMap::raycastPlayers(eyePos, dir, range,
                                                           g_players, MAX_PLAYERS, g_localId, playerDist);
                         Vec3 wallHit;
                         float wallDist;
-                        bool hitWall = g_map.raycast(eyePos, dir, def.range, wallHit, wallDist);
-                        if (hitP >= 0 && (!hitWall || playerDist < wallDist)) {
+                        bool hitWall = g_map.raycast(eyePos, dir, range, wallHit, wallDist);
+                        if (hitP >= 0 && (!hitWall || playerDist < wallDist) &&
+                            g_players[hitP].teamId != g_players[g_localId].teamId) {
                             g_hitMarkerTimer = 0.2f;
                             g_renderer.spawnBloodSplatter(g_players[hitP].position);
                         }
-                        if (hitWall && (!hitP || wallDist < playerDist)) {
-                            // Compute wall normal (approximate)
-                            Vec3 wallNorm = {0, 1, 0}; // Default up
+                        if (hitWall && (hitP < 0 || wallDist < playerDist)) {
+                            Vec3 wallNorm = {0, 1, 0};
                             g_renderer.spawnBulletImpact(wallHit, wallNorm);
                         }
 
-                        // Muzzle sparks
                         g_renderer.spawnMuzzleSpark(eyePos + dir * 0.5f, dir);
                     }
 
-                    if (g_players[g_localId].vehicleId < 0)
+                    if (!inVehicle)
                         tickPlayer(g_players[g_localId], g_currentInput, g_map, g_deltaTime);
                 }
 
@@ -688,6 +771,18 @@ int main(int, char**) {
                     g_renderer.renderVehicle(g_vehicles[i], g_time);
                 }
 
+                // Render flags
+                for (int t = 0; t < 2; t++) {
+                    g_renderer.renderFlag(g_flags[t], t, g_time);
+                }
+
+                // Render tornados
+                for (int i = 0; i < MAX_TORNADOS; i++) {
+                    if (g_tornados[i].active) {
+                        g_renderer.renderTornado(g_tornados[i], g_time);
+                    }
+                }
+
                 // Particles (3D scene)
                 g_renderer.renderParticles();
 
@@ -713,13 +808,51 @@ int main(int, char**) {
                         g_screenW, g_screenH);
                 }
 
+                // CTF HUD: team scores and flag status
+                if (g_localId >= 0) {
+                    char scoreBuf[64];
+                    snprintf(scoreBuf, sizeof(scoreBuf), "RED %d - %d BLU",
+                             g_teamScores[0], g_teamScores[1]);
+                    g_renderer.drawText(scoreBuf, g_screenW * 0.5f - 60, g_screenH - 30,
+                                        2.5f, {1, 1, 1}, g_screenW, g_screenH);
+
+                    // Team indicator
+                    int myTeam = g_players[g_localId].teamId;
+                    Vec3 teamColor = myTeam == 0 ? Vec3{1, 0.3f, 0.3f} : Vec3{0.3f, 0.5f, 1};
+                    const char* teamName = myTeam == 0 ? "TEAM RED" : "TEAM BLUE";
+                    g_renderer.drawText(teamName, g_screenW * 0.5f - 40, g_screenH - 55,
+                                        2.0f, teamColor, g_screenW, g_screenH);
+
+                    // Flag status indicators
+                    for (int t = 0; t < 2; t++) {
+                        Vec3 fColor = t == 0 ? Vec3{1, 0.3f, 0.3f} : Vec3{0.3f, 0.5f, 1};
+                        const char* flagStatus;
+                        if (g_flags[t].carrierId >= 0)
+                            flagStatus = t == 0 ? "RED FLAG: TAKEN" : "BLU FLAG: TAKEN";
+                        else if (g_flags[t].atBase)
+                            flagStatus = t == 0 ? "RED FLAG: BASE" : "BLU FLAG: BASE";
+                        else
+                            flagStatus = t == 0 ? "RED FLAG: DROPPED" : "BLU FLAG: DROPPED";
+                        g_renderer.drawText(flagStatus, 10, g_screenH - 80 - t * 20,
+                                            1.8f, fColor, g_screenW, g_screenH);
+                    }
+                }
+
                 // Vehicle prompt or info
                 if (g_localId >= 0 && g_players[g_localId].vehicleId >= 0) {
                     int vid = g_players[g_localId].vehicleId;
-                    char vbuf[64];
-                    snprintf(vbuf, sizeof(vbuf), "%s  HP:%d  [E] Exit",
-                             getVehicleDef(g_vehicles[vid].type).name, g_vehicles[vid].health);
-                    g_renderer.drawText(vbuf, g_screenW * 0.5f - 120, 60, 2.5f, {0.5f, 1.0f, 0.5f}, g_screenW, g_screenH);
+                    VehicleType vt = g_vehicles[vid].type;
+                    char vbuf[96];
+                    if (vt == VehicleType::HELICOPTER)
+                        snprintf(vbuf, sizeof(vbuf), "%s  HP:%d  Space/Ctrl=Up/Down  [E] Exit",
+                                 getVehicleDef(vt).name, g_vehicles[vid].health);
+                    else if (vt == VehicleType::PLANE)
+                        snprintf(vbuf, sizeof(vbuf), "%s  HP:%d  Space/Ctrl=Pitch  [E] Eject",
+                                 getVehicleDef(vt).name, g_vehicles[vid].health);
+                    else
+                        snprintf(vbuf, sizeof(vbuf), "%s  HP:%d  [E] Exit",
+                                 getVehicleDef(vt).name, g_vehicles[vid].health);
+                    g_renderer.drawText(vbuf, g_screenW * 0.5f - 160, 60, 2.5f, {0.5f, 1.0f, 0.5f}, g_screenW, g_screenH);
                 } else if (g_localId >= 0) {
                     // Check if near a vehicle
                     for (int i = 0; i < g_numVehicles; i++) {
@@ -787,6 +920,12 @@ int main(int, char**) {
                 }
                 for (int i = 0; i < g_numVehicles; i++) {
                     g_renderer.renderVehicle(g_vehicles[i], g_time);
+                }
+                for (int t = 0; t < 2; t++) {
+                    g_renderer.renderFlag(g_flags[t], t, g_time);
+                }
+                for (int i = 0; i < MAX_TORNADOS; i++) {
+                    if (g_tornados[i].active) g_renderer.renderTornado(g_tornados[i], g_time);
                 }
 
                 float timer = g_localId >= 0 ? g_players[g_localId].respawnTimer : RESPAWN_TIME;

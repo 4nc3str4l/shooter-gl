@@ -63,6 +63,15 @@ static bool             g_running = true;
 static VehicleData      g_vehicles[MAX_VEHICLES];
 static int              g_numVehicles = 0;
 
+// Teams & CTF
+static int              g_teamScores[2] = {0, 0};
+static FlagData         g_flags[2];
+static int              g_nextTeam = 0; // Round-robin team assignment
+
+// Tornados
+static TornadoData      g_tornados[MAX_TORNADOS];
+static float            g_tornadoSpawnTimer = 30.0f; // First tornado after 30s
+
 // Kill feed
 struct KillEvent {
     int killer, victim;
@@ -160,16 +169,22 @@ static int findFreeSlot() {
 }
 
 static void spawnPlayer(int id) {
-    const auto& spawns = g_map.spawns();
-    int si = rand() % spawns.size();
-    g_players[id].position = spawns[si].position;
-    g_players[id].yaw = spawns[si].yaw;
+    // Use team-specific spawns
+    int team = g_players[id].teamId;
+    const auto& spawns = g_map.teamSpawns(team);
+    const auto& fallback = g_map.spawns();
+    const auto& chosen = spawns.empty() ? fallback : spawns;
+    int si = rand() % chosen.size();
+    g_players[id].position = chosen[si].position;
+    g_players[id].yaw = chosen[si].yaw;
     g_players[id].pitch = 0;
     g_players[id].velocity = {0, 0, 0};
     g_players[id].health = MAX_HEALTH;
     g_players[id].state = PlayerState::ALIVE;
     g_players[id].fireCooldown = 0;
     g_players[id].respawnTimer = 0;
+    g_players[id].vehicleId = -1;
+    g_players[id].isDriver = false;
 
     if (g_players[id].currentWeapon == WeaponType::NONE) {
         g_players[id].currentWeapon = WeaponType::PISTOL;
@@ -182,7 +197,7 @@ static void spawnPlayer(int id) {
 // ============================================================================
 
 static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
-    uint8_t buf[8192];
+    uint8_t buf[16384];
     int offset = 0;
 
     SnapshotPacket hdr;
@@ -190,6 +205,8 @@ static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
     if (clientPlayerId >= 0 && clientPlayerId < MAX_PLAYERS) {
         hdr.ackInputSeq = g_clients[clientPlayerId].lastInputSeq;
     }
+    hdr.teamScores[0] = (uint8_t)std::clamp(g_teamScores[0], 0, 255);
+    hdr.teamScores[1] = (uint8_t)std::clamp(g_teamScores[1], 0, 255);
 
     // Count active players
     uint8_t count = 0;
@@ -216,6 +233,7 @@ static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
         np.weapon = (uint8_t)g_players[i].currentWeapon;
         np.ammo = (uint8_t)std::clamp(g_players[i].ammo, 0, 255);
         np.vehicleId = g_players[i].vehicleId;
+        np.teamId = g_players[i].teamId;
         memcpy(buf + offset, &np, sizeof(np));
         offset += sizeof(np);
     }
@@ -251,12 +269,47 @@ static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
         nv.y = g_vehicles[i].position.y;
         nv.z = g_vehicles[i].position.z;
         nv.yaw = g_vehicles[i].yaw;
+        nv.pitch = g_vehicles[i].pitch;
         nv.turretYaw = g_vehicles[i].turretYaw;
         nv.health = (int16_t)g_vehicles[i].health;
         nv.driverId = g_vehicles[i].driverId;
         nv.active = g_vehicles[i].active ? 1 : 0;
+        nv.rotorAngle = g_vehicles[i].rotorAngle;
         memcpy(buf + offset, &nv, sizeof(nv));
         offset += sizeof(nv);
+    }
+
+    // Flag states (2 flags)
+    for (int t = 0; t < 2; t++) {
+        NetFlagState nf;
+        nf.teamId = t;
+        nf.x = g_flags[t].position.x;
+        nf.y = g_flags[t].position.y;
+        nf.z = g_flags[t].position.z;
+        nf.carrierId = g_flags[t].carrierId;
+        nf.atBase = g_flags[t].atBase ? 1 : 0;
+        memcpy(buf + offset, &nf, sizeof(nf));
+        offset += sizeof(nf);
+    }
+
+    // Tornado states
+    uint8_t numTornados = 0;
+    for (int i = 0; i < MAX_TORNADOS; i++) {
+        if (g_tornados[i].active) numTornados++;
+    }
+    memcpy(buf + offset, &numTornados, 1);
+    offset += 1;
+    for (int i = 0; i < MAX_TORNADOS; i++) {
+        if (!g_tornados[i].active) continue;
+        NetTornadoState nt;
+        nt.x = g_tornados[i].position.x;
+        nt.y = g_tornados[i].position.y;
+        nt.z = g_tornados[i].position.z;
+        nt.radius = g_tornados[i].radius;
+        nt.rotation = g_tornados[i].rotation;
+        nt.active = 1;
+        memcpy(buf + offset, &nt, sizeof(nt));
+        offset += sizeof(nt);
     }
 
     g_socket.sendTo(buf, offset, addr);
@@ -292,6 +345,9 @@ static void handleJoin(const JoinPacket& pkt, const sockaddr_in& from) {
     snprintf(g_players[slot].name, sizeof(g_players[slot].name), "%s", pkt.name);
     g_players[slot].currentWeapon = WeaponType::PISTOL;
     g_players[slot].ammo = getWeaponDef(WeaponType::PISTOL).magSize;
+    // Assign team (round-robin)
+    g_players[slot].teamId = g_nextTeam;
+    g_nextTeam = (g_nextTeam + 1) % 2;
     spawnPlayer(slot);
 
     g_clients[slot].addr = from;
@@ -305,7 +361,7 @@ static void handleJoin(const JoinPacket& pkt, const sockaddr_in& from) {
     ack.numBots = g_numBots;
     g_socket.sendTo(&ack, sizeof(ack), from);
 
-    printf("Player '%s' joined as ID %d\n", g_players[slot].name, slot);
+    printf("Player '%s' joined as ID %d (Team %d)\n", g_players[slot].name, slot, g_players[slot].teamId);
 }
 
 static void handleInput(const InputPacket& pkt, const sockaddr_in& from) {
@@ -379,7 +435,8 @@ static void processShot(int shooterId) {
         float wallDist;
         bool hitWall = g_map.raycast(eyePos, dir, def.range, wallHit, wallDist);
 
-        if (hitPlayer >= 0 && (!hitWall || playerDist < wallDist)) {
+        if (hitPlayer >= 0 && (!hitWall || playerDist < wallDist) &&
+            g_players[hitPlayer].teamId != g_players[shooterId].teamId) {
             g_players[hitPlayer].health -= def.damage;
             printf("  HIT! %s -> %s for %d dmg (hp now %d)\n",
                    g_players[shooterId].name, g_players[hitPlayer].name,
@@ -400,6 +457,16 @@ static void processShot(int shooterId) {
                 g_players[hitPlayer].health = 0;
                 g_players[hitPlayer].state = PlayerState::DEAD;
                 g_players[hitPlayer].respawnTimer = RESPAWN_TIME;
+
+                // Drop flag if carrying
+                for (int t = 0; t < 2; t++) {
+                    if (g_flags[t].carrierId == hitPlayer) {
+                        g_flags[t].carrierId = -1;
+                        g_flags[t].atBase = false;
+                        g_flags[t].position = g_players[hitPlayer].position;
+                        g_flags[t].returnTimer = 30.0f;
+                    }
+                }
 
                 PlayerDiedPacket diePkt;
                 diePkt.victimId = hitPlayer;
@@ -446,6 +513,199 @@ static void processPickups(float dt) {
                 printf("Player %d picked up %s\n", i, getWeaponDef(wp.type).name);
                 break;
             }
+        }
+    }
+}
+
+// ============================================================================
+// CTF (Capture the Flag)
+// ============================================================================
+
+static void initFlags() {
+    for (int t = 0; t < 2; t++) {
+        g_flags[t].basePos = g_map.flagBasePos(t);
+        g_flags[t].position = g_flags[t].basePos;
+        g_flags[t].carrierId = -1;
+        g_flags[t].atBase = true;
+        g_flags[t].returnTimer = 0;
+    }
+}
+
+static void tickCTF(float dt) {
+    for (int t = 0; t < 2; t++) {
+        auto& flag = g_flags[t];
+
+        // If flag is being carried, update position to carrier
+        if (flag.carrierId >= 0) {
+            if (g_players[flag.carrierId].state != PlayerState::ALIVE) {
+                // Carrier died, drop flag
+                flag.position = g_players[flag.carrierId].position;
+                flag.carrierId = -1;
+                flag.atBase = false;
+                flag.returnTimer = 30.0f;
+            } else {
+                flag.position = g_players[flag.carrierId].position;
+                flag.position.y += 2.2f; // Float above carrier's head
+
+                // Check if carrier returned to own base with enemy flag
+                int carrierTeam = g_players[flag.carrierId].teamId;
+                if (carrierTeam != t) {
+                    // Carrying enemy flag, check if own flag is at base
+                    auto& ownFlag = g_flags[carrierTeam];
+                    float distToBase = (g_players[flag.carrierId].position - ownFlag.basePos).length();
+                    if (distToBase < FLAG_CAPTURE_DIST && ownFlag.atBase) {
+                        // SCORE!
+                        g_teamScores[carrierTeam]++;
+                        printf("TEAM %d SCORED! Score: %d-%d\n",
+                               carrierTeam, g_teamScores[0], g_teamScores[1]);
+                        // Return flag to base
+                        flag.position = flag.basePos;
+                        flag.carrierId = -1;
+                        flag.atBase = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Flag on ground (not at base): auto-return timer
+        if (!flag.atBase) {
+            flag.returnTimer -= dt;
+            if (flag.returnTimer <= 0) {
+                flag.position = flag.basePos;
+                flag.atBase = true;
+                printf("Flag %d returned to base\n", t);
+            }
+        }
+
+        // Check if any player can pick up this flag (enemy team)
+        for (int p = 0; p < MAX_PLAYERS; p++) {
+            if (g_players[p].state != PlayerState::ALIVE) continue;
+            float d = (g_players[p].position - flag.position).length();
+            if (d < FLAG_CAPTURE_DIST) {
+                if (g_players[p].teamId != t) {
+                    // Enemy picks up flag
+                    flag.carrierId = p;
+                    flag.atBase = false;
+                    printf("Player %d picked up team %d's flag!\n", p, t);
+                    break;
+                } else if (!flag.atBase) {
+                    // Friendly player returns flag to base
+                    flag.position = flag.basePos;
+                    flag.atBase = true;
+                    printf("Player %d returned team %d's flag!\n", p, t);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Tornados
+// ============================================================================
+
+static void tickTornados(float dt) {
+    g_tornadoSpawnTimer -= dt;
+
+    // Spawn new tornado periodically
+    if (g_tornadoSpawnTimer <= 0) {
+        g_tornadoSpawnTimer = randf(45.0f, 90.0f); // Next tornado in 45-90s
+        // Find inactive tornado slot
+        for (int i = 0; i < MAX_TORNADOS; i++) {
+            if (!g_tornados[i].active) {
+                auto& t = g_tornados[i];
+                t.active = true;
+                t.position = {randf(-120, 120), 0, randf(-120, 120)};
+                t.velocity = {randf(-3, 3), 0, randf(-3, 3)};
+                t.radius = randf(12, 20);
+                t.innerRadius = 3.0f;
+                t.strength = randf(25, 40);
+                t.damage = randf(3, 8);
+                t.lifetime = 0;
+                t.maxLifetime = randf(30, 60);
+                t.rotation = 0;
+                printf("Tornado spawned at %.0f, %.0f\n", t.position.x, t.position.z);
+                break;
+            }
+        }
+    }
+
+    for (int i = 0; i < MAX_TORNADOS; i++) {
+        auto& t = g_tornados[i];
+        if (!t.active) continue;
+
+        t.lifetime += dt;
+        t.rotation += dt * 4.0f; // Visual rotation
+
+        // Move tornado
+        t.position = t.position + t.velocity * dt;
+        // Wander
+        t.velocity.x += randf(-1, 1) * dt;
+        t.velocity.z += randf(-1, 1) * dt;
+        float hSpeed = sqrtf(t.velocity.x * t.velocity.x + t.velocity.z * t.velocity.z);
+        if (hSpeed > 5.0f) {
+            t.velocity.x = t.velocity.x / hSpeed * 5.0f;
+            t.velocity.z = t.velocity.z / hSpeed * 5.0f;
+        }
+        // Keep in bounds
+        t.position.x = std::clamp(t.position.x, -180.0f, 180.0f);
+        t.position.z = std::clamp(t.position.z, -180.0f, 180.0f);
+
+        // Affect players
+        for (int p = 0; p < MAX_PLAYERS; p++) {
+            if (g_players[p].state != PlayerState::ALIVE) continue;
+            Vec3 diff = t.position - g_players[p].position;
+            diff.y = 0;
+            float dist = diff.length();
+
+            if (dist < t.radius && dist > 0.1f) {
+                // Pull toward center
+                Vec3 pullDir = diff * (1.0f / dist);
+                float pullStrength = t.strength * (1.0f - dist / t.radius);
+
+                if (g_players[p].vehicleId < 0) {
+                    // On foot: pull and damage
+                    g_players[p].velocity = g_players[p].velocity + pullDir * pullStrength * dt;
+                    // Add upward force near center
+                    if (dist < t.radius * 0.5f) {
+                        g_players[p].velocity.y += pullStrength * 0.5f * dt;
+                    }
+                    // Damage in inner radius
+                    if (dist < t.innerRadius) {
+                        g_players[p].health -= (int)(t.damage * dt);
+                        if (g_players[p].health <= 0) {
+                            g_players[p].health = 0;
+                            g_players[p].state = PlayerState::DEAD;
+                            g_players[p].respawnTimer = RESPAWN_TIME;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Affect vehicles
+        for (int v2 = 0; v2 < g_numVehicles; v2++) {
+            auto& veh = g_vehicles[v2];
+            if (!veh.active) continue;
+            Vec3 diff = t.position - veh.position;
+            diff.y = 0;
+            float dist = diff.length();
+            if (dist < t.radius && dist > 0.1f) {
+                Vec3 pullDir = diff * (1.0f / dist);
+                float pullStrength = t.strength * 0.3f * (1.0f - dist / t.radius);
+                veh.velocity = veh.velocity + pullDir * pullStrength * dt;
+                // Damage vehicles in inner radius
+                if (dist < t.innerRadius) {
+                    veh.health -= (int)(t.damage * 2 * dt);
+                }
+            }
+        }
+
+        // Expire
+        if (t.lifetime > t.maxLifetime) {
+            t.active = false;
+            printf("Tornado expired\n");
         }
     }
 }
@@ -498,16 +758,66 @@ static void exitVehicle(int playerId) {
     PlayerData& p = g_players[playerId];
     if (p.vehicleId < 0) return;
     int vid = p.vehicleId;
+    VehicleType vtype = g_vehicles[vid].type;
     g_vehicles[vid].driverId = -1;
-    // Place player next to vehicle
-    p.position = g_vehicles[vid].position + Vec3{
-        sinf(g_vehicles[vid].yaw + PI * 0.5f) * 3.0f, 0,
-        cosf(g_vehicles[vid].yaw + PI * 0.5f) * 3.0f
-    };
-    p.position.y = 0.1f;
-    p.velocity = {0, 0, 0};
+
+    if (vtype == VehicleType::HELICOPTER || vtype == VehicleType::PLANE) {
+        // Eject: place player below vehicle, give downward velocity (will fall)
+        p.position = g_vehicles[vid].position;
+        p.position.y = std::max(0.1f, g_vehicles[vid].position.y - 2.0f);
+        p.velocity = {0, -2.0f, 0}; // Gentle fall
+    } else {
+        // Place player next to ground vehicle
+        p.position = g_vehicles[vid].position + Vec3{
+            sinf(g_vehicles[vid].yaw + PI * 0.5f) * 3.0f, 0,
+            cosf(g_vehicles[vid].yaw + PI * 0.5f) * 3.0f
+        };
+        p.position.y = 0.1f;
+        p.velocity = {0, 0, 0};
+    }
     p.vehicleId = -1;
     p.isDriver = false;
+}
+
+static void vehicleKill(int victimId, int killerId) {
+    g_players[victimId].health = 0;
+    g_players[victimId].state = PlayerState::DEAD;
+    g_players[victimId].respawnTimer = RESPAWN_TIME;
+    if (g_players[victimId].vehicleId >= 0) exitVehicle(victimId);
+
+    // Drop flag if carrying
+    for (int t = 0; t < 2; t++) {
+        if (g_flags[t].carrierId == victimId) {
+            g_flags[t].carrierId = -1;
+            g_flags[t].atBase = false;
+            g_flags[t].returnTimer = 30.0f;
+        }
+    }
+
+    PlayerDiedPacket diePkt;
+    diePkt.victimId = victimId;
+    diePkt.killerId = killerId;
+    for (int c = 0; c < MAX_PLAYERS; c++) {
+        if (g_clients[c].active)
+            g_socket.sendTo(&diePkt, sizeof(diePkt), g_clients[c].addr);
+    }
+    g_killFeed.push_back({killerId, victimId, 5.0f});
+}
+
+static void vehicleDamage(int victimId, int attackerId, int damage) {
+    g_players[victimId].health -= damage;
+    // Send hit notification
+    PlayerHitPacket hitPkt;
+    hitPkt.attackerId = attackerId;
+    hitPkt.victimId = victimId;
+    hitPkt.damage = damage;
+    for (int c = 0; c < MAX_PLAYERS; c++) {
+        if (g_clients[c].active)
+            g_socket.sendTo(&hitPkt, sizeof(hitPkt), g_clients[c].addr);
+    }
+    if (g_players[victimId].health <= 0) {
+        vehicleKill(victimId, attackerId);
+    }
 }
 
 static void tickVehicles(float dt) {
@@ -518,16 +828,29 @@ static void tickVehicles(float dt) {
             if (v.respawnTimer <= 0) {
                 v.position = v.spawnPos;
                 v.yaw = v.spawnYaw;
+                v.pitch = 0;
                 v.health = getVehicleDef(v.type).maxHealth;
                 v.active = true;
                 v.driverId = -1;
                 v.velocity = {0,0,0};
                 v.turretYaw = 0;
+                v.rotorAngle = 0;
+                v.altitude = 0;
             }
             continue;
         }
 
         if (v.fireCooldown > 0) v.fireCooldown -= dt;
+
+        // Rotor animation for helicopter
+        if (v.type == VehicleType::HELICOPTER) {
+            if (v.driverId >= 0) v.rotorAngle += dt * 25.0f;
+            else v.rotorAngle += dt * 2.0f; // Slow idle spin
+        }
+        // Propeller for plane
+        if (v.type == VehicleType::PLANE && v.driverId >= 0) {
+            v.rotorAngle += dt * 40.0f;
+        }
 
         if (v.driverId >= 0 && v.driverId < MAX_PLAYERS) {
             // Get driver's input
@@ -546,108 +869,186 @@ static void tickVehicles(float dt) {
             if (input) {
                 const auto& def = getVehicleDef(v.type);
 
-                // Turning
-                if (input->keys & InputState::KEY_A) v.yaw += def.turnRate * dt;
-                if (input->keys & InputState::KEY_D) v.yaw -= def.turnRate * dt;
+                if (v.type == VehicleType::JEEP || v.type == VehicleType::TANK) {
+                    // === GROUND VEHICLE PHYSICS ===
+                    if (input->keys & InputState::KEY_A) v.yaw += def.turnRate * dt;
+                    if (input->keys & InputState::KEY_D) v.yaw -= def.turnRate * dt;
 
-                // Acceleration
-                float accel = 0;
-                if (input->keys & InputState::KEY_W) accel = def.speed;
-                if (input->keys & InputState::KEY_S) accel = -def.speed * 0.5f;
+                    float accel = 0;
+                    if (input->keys & InputState::KEY_W) accel = def.speed;
+                    if (input->keys & InputState::KEY_S) accel = -def.speed * 0.5f;
 
-                Vec3 forward = {sinf(v.yaw), 0, cosf(v.yaw)};
-                v.velocity = forward * accel;
+                    Vec3 forward = {sinf(v.yaw), 0, cosf(v.yaw)};
+                    v.velocity = forward * accel;
 
-                // Tank turret follows driver aim
-                if (v.type == VehicleType::TANK) {
-                    v.turretYaw = input->yaw - v.yaw;
+                    if (v.type == VehicleType::TANK) {
+                        v.turretYaw = input->yaw - v.yaw;
+                    }
+
+                    Vec3 newPos = v.position + v.velocity * dt;
+                    newPos.y = 0.1f;
+                    newPos.x = std::clamp(newPos.x, -190.0f, 190.0f);
+                    newPos.z = std::clamp(newPos.z, -190.0f, 190.0f);
+                    v.position = newPos;
+
+                } else if (v.type == VehicleType::HELICOPTER) {
+                    // === HELICOPTER PHYSICS ===
+                    // A/D = yaw turn
+                    if (input->keys & InputState::KEY_A) v.yaw += def.turnRate * dt;
+                    if (input->keys & InputState::KEY_D) v.yaw -= def.turnRate * dt;
+
+                    // W/S = forward/back
+                    float accel = 0;
+                    if (input->keys & InputState::KEY_W) accel = def.speed;
+                    if (input->keys & InputState::KEY_S) accel = -def.speed * 0.4f;
+
+                    Vec3 forward = {sinf(v.yaw), 0, cosf(v.yaw)};
+                    Vec3 hVel = forward * accel;
+
+                    // Space/Ctrl = ascend/descend (use JUMP/KEY_DOWN)
+                    float vertSpeed = 0;
+                    if (input->keys & InputState::KEY_UP) vertSpeed = 10.0f;
+                    if (input->keys & InputState::KEY_DOWN) vertSpeed = -10.0f;
+
+                    v.velocity = {hVel.x, vertSpeed, hVel.z};
+
+                    Vec3 newPos = v.position + v.velocity * dt;
+                    newPos.y = std::clamp(newPos.y, 0.5f, 80.0f);
+                    newPos.x = std::clamp(newPos.x, -190.0f, 190.0f);
+                    newPos.z = std::clamp(newPos.z, -190.0f, 190.0f);
+                    v.position = newPos;
+
+                    // Tilt based on movement
+                    v.pitch = accel / def.speed * -0.2f;
+
+                } else if (v.type == VehicleType::PLANE) {
+                    // === PLANE PHYSICS ===
+                    // Always moves forward at high speed
+                    float speed = def.speed;
+                    if (input->keys & InputState::KEY_W) speed = def.speed * 1.3f;
+                    if (input->keys & InputState::KEY_S) speed = def.speed * 0.7f;
+
+                    // A/D = yaw/roll
+                    if (input->keys & InputState::KEY_A) v.yaw += def.turnRate * dt;
+                    if (input->keys & InputState::KEY_D) v.yaw -= def.turnRate * dt;
+
+                    // JUMP/DOWN = pitch up/down
+                    if (input->keys & InputState::KEY_UP) v.pitch += 1.5f * dt;
+                    if (input->keys & InputState::KEY_DOWN) v.pitch -= 1.5f * dt;
+                    v.pitch = std::clamp(v.pitch, -0.6f, 0.6f);
+
+                    Vec3 forward = {
+                        sinf(v.yaw) * cosf(v.pitch),
+                        sinf(v.pitch),
+                        cosf(v.yaw) * cosf(v.pitch)
+                    };
+                    v.velocity = forward * speed;
+
+                    Vec3 newPos = v.position + v.velocity * dt;
+                    newPos.y = std::clamp(newPos.y, 5.0f, 100.0f); // Planes can't go below 5m
+                    newPos.x = std::clamp(newPos.x, -190.0f, 190.0f);
+                    newPos.z = std::clamp(newPos.z, -190.0f, 190.0f);
+
+                    // If at boundary, turn around
+                    if (fabsf(newPos.x) > 185.0f || fabsf(newPos.z) > 185.0f) {
+                        v.yaw += PI * dt; // Force turn
+                    }
+                    v.position = newPos;
                 }
-
-                // Move vehicle
-                Vec3 newPos = v.position + v.velocity * dt;
-                newPos.y = 0.1f; // Vehicles stay on ground
-                // Simple boundary clamp
-                newPos.x = std::clamp(newPos.x, -190.0f, 190.0f);
-                newPos.z = std::clamp(newPos.z, -190.0f, 190.0f);
-                v.position = newPos;
 
                 // Update driver position to follow vehicle
                 g_players[v.driverId].position = v.position;
                 g_players[v.driverId].position.y = v.position.y + 1.0f;
+                g_players[v.driverId].yaw = input->yaw;
+                g_players[v.driverId].pitch = input->pitch;
 
-                // Vehicle shooting (tank cannon)
+                // === VEHICLE SHOOTING ===
                 if ((input->keys & InputState::KEY_SHOOT) && def.cannonDamage > 0 && v.fireCooldown <= 0) {
                     v.fireCooldown = def.cannonRate;
-                    float aimYaw = v.yaw + v.turretYaw;
-                    float aimPitch = input->pitch;
+
+                    float aimYaw, aimPitch;
+                    Vec3 origin;
+
+                    if (v.type == VehicleType::TANK) {
+                        aimYaw = v.yaw + v.turretYaw;
+                        aimPitch = input->pitch;
+                        origin = v.position + Vec3{0, 2.5f, 0};
+                    } else {
+                        // Helicopters/planes aim where driver looks
+                        aimYaw = input->yaw;
+                        aimPitch = input->pitch;
+                        origin = v.position + Vec3{0, 0.5f, 0};
+                    }
+
                     Vec3 cannonDir = {
                         sinf(aimYaw) * cosf(aimPitch),
                         sinf(aimPitch),
                         cosf(aimYaw) * cosf(aimPitch)
                     };
                     cannonDir = cannonDir.normalize();
-                    Vec3 cannonOrigin = v.position + Vec3{0, 2.5f, 0} + cannonDir * 3.0f;
+                    origin = origin + cannonDir * 3.0f;
 
-                    // Cannon hit check
                     float pDist = 500.0f;
-                    int hitP = GameMap::raycastPlayers(cannonOrigin, cannonDir, 500.0f,
+                    int hitP = GameMap::raycastPlayers(origin, cannonDir, 500.0f,
                                                       g_players, MAX_PLAYERS, v.driverId, pDist);
-                    if (hitP >= 0) {
-                        g_players[hitP].health -= def.cannonDamage;
-                        if (g_players[hitP].health <= 0) {
-                            g_players[hitP].health = 0;
-                            g_players[hitP].state = PlayerState::DEAD;
-                            g_players[hitP].respawnTimer = RESPAWN_TIME;
-                            if (g_players[hitP].vehicleId >= 0) exitVehicle(hitP);
-                            PlayerDiedPacket diePkt;
-                            diePkt.victimId = hitP;
-                            diePkt.killerId = v.driverId;
-                            for (int c = 0; c < MAX_PLAYERS; c++) {
-                                if (g_clients[c].active)
-                                    g_socket.sendTo(&diePkt, sizeof(diePkt), g_clients[c].addr);
-                            }
-                        }
+                    Vec3 wallHit;
+                    float wallDist;
+                    bool hitWall = g_map.raycast(origin, cannonDir, 500.0f, wallHit, wallDist);
+
+                    if (hitP >= 0 && (!hitWall || pDist < wallDist)) {
+                        vehicleDamage(hitP, v.driverId, def.cannonDamage);
+                        printf("Vehicle cannon hit! %s -> %s for %d dmg\n",
+                               g_players[v.driverId].name, g_players[hitP].name, def.cannonDamage);
                     }
                 }
 
-                // Run over players (vehicle collision damage)
-                float speed = v.velocity.length();
-                if (speed > 5.0f) {
-                    for (int p = 0; p < MAX_PLAYERS; p++) {
-                        if (p == v.driverId) continue;
-                        if (g_players[p].state != PlayerState::ALIVE) continue;
-                        if (g_players[p].vehicleId >= 0) continue; // Can't run over people in vehicles
-                        float d = (g_players[p].position - v.position).length();
-                        if (d < 2.5f) {
-                            int dmg = (int)(speed * 3.0f);
-                            g_players[p].health -= dmg;
-                            g_players[p].velocity = v.velocity * 0.5f + Vec3{0, 5, 0};
-                            if (g_players[p].health <= 0) {
-                                g_players[p].health = 0;
-                                g_players[p].state = PlayerState::DEAD;
-                                g_players[p].respawnTimer = RESPAWN_TIME;
-                                PlayerDiedPacket diePkt;
-                                diePkt.victimId = p;
-                                diePkt.killerId = v.driverId;
-                                for (int c = 0; c < MAX_PLAYERS; c++) {
-                                    if (g_clients[c].active)
-                                        g_socket.sendTo(&diePkt, sizeof(diePkt), g_clients[c].addr);
-                                }
+                // Run over players (ground vehicles only)
+                if (v.type == VehicleType::JEEP || v.type == VehicleType::TANK) {
+                    float speed = v.velocity.length();
+                    if (speed > 5.0f) {
+                        for (int p = 0; p < MAX_PLAYERS; p++) {
+                            if (p == v.driverId) continue;
+                            if (g_players[p].state != PlayerState::ALIVE) continue;
+                            if (g_players[p].vehicleId >= 0) continue;
+                            // Don't run over teammates
+                            if (g_players[p].teamId == g_players[v.driverId].teamId) continue;
+                            float d = (g_players[p].position - v.position).length();
+                            if (d < 2.5f) {
+                                int dmg = (int)(speed * 3.0f);
+                                g_players[p].velocity = v.velocity * 0.5f + Vec3{0, 5, 0};
+                                vehicleDamage(p, v.driverId, dmg);
                             }
                         }
                     }
                 }
             }
         } else {
-            // No driver: vehicle slows down
-            v.velocity = v.velocity * 0.95f;
-            if (v.velocity.lengthSq() < 0.01f) v.velocity = {0,0,0};
+            // No driver
+            if (v.type == VehicleType::HELICOPTER) {
+                // Slowly descend
+                v.velocity = {0, -3.0f, 0};
+                v.position = v.position + v.velocity * dt;
+                if (v.position.y <= 0.5f) {
+                    v.position.y = 0.5f;
+                    v.velocity = {0,0,0};
+                }
+            } else if (v.type == VehicleType::PLANE) {
+                // Plane with no driver crashes
+                v.velocity.y -= 15.0f * dt;
+                v.position = v.position + v.velocity * dt;
+                if (v.position.y <= 0.1f) {
+                    v.health = 0; // Crash
+                }
+            } else {
+                v.velocity = v.velocity * 0.95f;
+                if (v.velocity.lengthSq() < 0.01f) v.velocity = {0,0,0};
+            }
         }
 
         // Vehicle destruction
         if (v.health <= 0) {
             v.active = false;
-            v.respawnTimer = 30.0f; // Respawn in 30 seconds
+            v.respawnTimer = 30.0f;
             if (v.driverId >= 0) {
                 g_players[v.driverId].health = 0;
                 g_players[v.driverId].state = PlayerState::DEAD;
@@ -687,6 +1088,8 @@ static int findNearestVisibleEnemy(int botId, float maxRange) {
     for (int i = 0; i < MAX_PLAYERS; i++) {
         if (i == botId) continue;
         if (g_players[i].state != PlayerState::ALIVE) continue;
+        // Don't target teammates
+        if (g_players[i].teamId == g_players[botId].teamId) continue;
         float d = (g_players[i].position - g_players[botId].position).length();
         if (d < bestDist && canSeePlayer(botId, i)) {
             bestDist = d;
@@ -1092,6 +1495,9 @@ static void spawnBots(int count) {
 
         g_players[slot] = PlayerData{};
         g_players[slot].isBot = true;
+        // Assign team (alternating)
+        g_players[slot].teamId = g_nextTeam;
+        g_nextTeam = (g_nextTeam + 1) % 2;
         snprintf(g_players[slot].name, sizeof(g_players[slot].name), "Bot_%d", i + 1);
         g_players[slot].currentWeapon = WeaponType::PISTOL;
         g_players[slot].ammo = getWeaponDef(WeaponType::PISTOL).magSize;
@@ -1152,7 +1558,9 @@ int main(int argc, char** argv) {
 
     spawnBots(botCount);
     spawnVehicles();
+    initFlags();
     printf("Vehicles spawned: %d\n", g_numVehicles);
+    printf("CTF flags initialized\n");
 
     printf("Server running. Press Ctrl+C to stop.\n\n");
 
@@ -1251,6 +1659,12 @@ int main(int argc, char** argv) {
 
         // --- Process weapon pickups ---
         processPickups(TICK_DURATION);
+
+        // --- CTF logic ---
+        tickCTF(TICK_DURATION);
+
+        // --- Tornado logic ---
+        tickTornados(TICK_DURATION);
 
         // --- Update kill feed timers ---
         for (auto it = g_killFeed.begin(); it != g_killFeed.end();) {

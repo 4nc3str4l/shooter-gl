@@ -48,11 +48,13 @@ public:
 
     const std::vector<MapBlock>&    blocks() const { return blocks_; }
     const std::vector<SpawnPoint>&  spawns() const { return spawns_; }
+    const std::vector<SpawnPoint>&  teamSpawns(int team) const { return teamSpawns_[team]; }
     std::vector<WeaponPickup>&      weaponPickups() { return pickups_; }
     const std::vector<WeaponPickup>& weaponPickups() const { return pickups_; }
     const std::vector<Waypoint>&       waypoints() const { return waypoints_; }
     std::vector<Waypoint>&             waypoints() { return waypoints_; }
     const std::vector<VehicleSpawn>&   vehicleSpawns() const { return vehicleSpawns_; }
+    Vec3 flagBasePos(int team) const { return flagBasePos_[team]; }
 
     // Find nearest waypoint to a position
     int findNearestWaypoint(const Vec3& pos) const;
@@ -75,9 +77,11 @@ public:
 private:
     std::vector<MapBlock>      blocks_;
     std::vector<SpawnPoint>    spawns_;
+    std::vector<SpawnPoint>    teamSpawns_[2]; // Team-separated spawns
     std::vector<WeaponPickup>  pickups_;
     std::vector<Waypoint>      waypoints_;
     std::vector<VehicleSpawn>  vehicleSpawns_;
+    Vec3                       flagBasePos_[2]; // CTF flag positions
 
     // Helpers for map building
     void addBlock(const Vec3& min, const Vec3& max, const Vec3& color, bool isFloor = false);

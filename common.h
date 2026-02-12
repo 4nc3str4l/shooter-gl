@@ -208,7 +208,7 @@ constexpr int    MAX_HEALTH       = 100;
 constexpr float  PI               = 3.14159265358979f;
 
 // Vehicle constants
-constexpr int    MAX_VEHICLES     = 20;
+constexpr int    MAX_VEHICLES     = 30;
 constexpr float  VEHICLE_ENTER_RANGE = 3.5f;
 
 // ============================================================================
@@ -262,6 +262,8 @@ struct InputState {
     static constexpr uint16_t KEY_SHOOT  = 0x20;
     static constexpr uint16_t KEY_RELOAD = 0x40;
     static constexpr uint16_t KEY_USE    = 0x80;  // Enter/exit vehicle
+    static constexpr uint16_t KEY_UP     = 0x100; // Helicopter ascend (Space while in heli)
+    static constexpr uint16_t KEY_DOWN   = 0x200; // Helicopter descend (Ctrl while in heli)
 };
 
 struct PlayerData {
@@ -286,7 +288,7 @@ struct PlayerData {
 // ============================================================================
 
 enum class VehicleType : uint8_t {
-    JEEP = 0, TANK, COUNT
+    JEEP = 0, TANK, HELICOPTER, PLANE, COUNT
 };
 
 struct VehicleDef {
@@ -301,8 +303,10 @@ struct VehicleDef {
 
 inline const VehicleDef& getVehicleDef(VehicleType t) {
     static const VehicleDef defs[] = {
-        {"Jeep",  22.0f, 2.5f, 250,   0,  0.0f, 3.5f, 2.0f, 1.8f},
-        {"Tank",   9.0f, 1.2f, 1200, 80,  2.0f, 5.0f, 3.0f, 2.5f},
+        {"Jeep",       22.0f, 2.5f,  250,   0,  0.0f, 3.5f, 2.0f, 1.8f},
+        {"Tank",        9.0f, 1.2f, 1200,  80,  2.0f, 5.0f, 3.0f, 2.5f},
+        {"Helicopter", 18.0f, 2.0f,  600,  15,  0.1f, 6.0f, 3.0f, 3.0f},
+        {"Plane",      35.0f, 1.5f,  400,  25,  0.15f,7.0f, 4.0f, 2.0f},
     };
     return defs[static_cast<int>(t)];
 }
@@ -310,6 +314,7 @@ inline const VehicleDef& getVehicleDef(VehicleType t) {
 struct VehicleData {
     Vec3        position = {0, 0, 0};
     float       yaw = 0;
+    float       pitch = 0;        // For planes/helicopters
     float       turretYaw = 0;    // Relative to body (tank only)
     Vec3        velocity = {0, 0, 0};
     int         health = 0;
@@ -320,4 +325,36 @@ struct VehicleData {
     float       respawnTimer = 0;
     Vec3        spawnPos;
     float       spawnYaw = 0;
+    float       rotorAngle = 0;   // Visual: helicopter rotor spin
+    float       altitude = 0;     // Helicopter target altitude
+};
+
+// ============================================================================
+// Teams & CTF
+// ============================================================================
+
+constexpr int    NUM_TEAMS         = 2;
+constexpr int    MAX_TORNADOS      = 3;
+constexpr float  FLAG_CAPTURE_DIST = 2.0f;
+constexpr float  FLAG_RETURN_DIST  = 2.0f;
+
+struct FlagData {
+    Vec3    basePos = {0, 0, 0};   // Where flag spawns
+    Vec3    position = {0, 0, 0};  // Current position
+    int16_t carrierId = -1;        // Player carrying it (-1 = nobody)
+    bool    atBase = true;
+    float   returnTimer = 0;       // Auto-return after 30s on ground
+};
+
+struct TornadoData {
+    Vec3    position = {0, 0, 0};
+    Vec3    velocity = {0, 0, 0};  // Movement direction
+    float   radius = 15.0f;       // Pull radius
+    float   innerRadius = 3.0f;   // Damage radius
+    float   strength = 30.0f;     // Pull force
+    float   damage = 5.0f;        // DPS in inner radius
+    float   lifetime = 0;
+    float   maxLifetime = 60.0f;
+    bool    active = false;
+    float   rotation = 0;         // Visual rotation angle
 };
