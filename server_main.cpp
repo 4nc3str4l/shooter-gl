@@ -273,6 +273,9 @@ static void processShot(int shooterId) {
 
         if (hitPlayer >= 0 && (!hitWall || playerDist < wallDist)) {
             g_players[hitPlayer].health -= def.damage;
+            printf("  HIT! %s -> %s for %d dmg (hp now %d)\n",
+                   g_players[shooterId].name, g_players[hitPlayer].name,
+                   def.damage, g_players[hitPlayer].health);
 
             // Send hit notification to all clients
             PlayerHitPacket hitPkt;

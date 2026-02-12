@@ -921,22 +921,75 @@ void Renderer::drawRect(float x, float y, float w, float h,
     glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
-void Renderer::renderCrosshair(int screenW, int screenH) {
+void Renderer::renderCrosshair(int screenW, int screenH, bool hitMarker) {
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     float cx = screenW * 0.5f;
     float cy = screenH * 0.5f;
-    float size = 10;
-    float thick = 2;
 
-    // White crosshair with gap in center
-    Vec3 white = {1, 1, 1};
-    drawRect(cx - size, cy - thick/2, size - 3, thick, white, 0.8f, screenW, screenH);
-    drawRect(cx + 3, cy - thick/2, size - 3, thick, white, 0.8f, screenW, screenH);
-    drawRect(cx - thick/2, cy - size, thick, size - 3, white, 0.8f, screenW, screenH);
-    drawRect(cx - thick/2, cy + 3, thick, size - 3, white, 0.8f, screenW, screenH);
+    if (hitMarker) {
+        // Hit marker: red X
+        float size = 12;
+        float thick = 2.5f;
+        Vec3 red = {1.0f, 0.2f, 0.2f};
+        // Diagonal lines forming an X
+        for (float t = -size; t < size; t += 1.0f) {
+            drawRect(cx + t - thick/2, cy + t - thick/2, thick, thick, red, 0.9f, screenW, screenH);
+            drawRect(cx + t - thick/2, cy - t - thick/2, thick, thick, red, 0.9f, screenW, screenH);
+        }
+    } else {
+        // Normal white crosshair with gap
+        float size = 10;
+        float thick = 2;
+        Vec3 white = {1, 1, 1};
+        drawRect(cx - size, cy - thick/2, size - 3, thick, white, 0.8f, screenW, screenH);
+        drawRect(cx + 3, cy - thick/2, size - 3, thick, white, 0.8f, screenW, screenH);
+        drawRect(cx - thick/2, cy - size, thick, size - 3, white, 0.8f, screenW, screenH);
+        drawRect(cx - thick/2, cy + 3, thick, size - 3, white, 0.8f, screenW, screenH);
+    }
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::renderMuzzleFlash(int screenW, int screenH, float timer) {
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float cx = screenW * 0.5f;
+    float cy = screenH * 0.5f;
+
+    // Bright flash near center-bottom (where weapon barrel is)
+    float alpha = timer / 0.06f; // Fade out
+    float flashSize = 30 + (1.0f - alpha) * 20;
+    drawRect(cx - flashSize/2 + 40, cy - flashSize/2 - 60,
+             flashSize, flashSize, {1.0f, 0.9f, 0.5f}, alpha * 0.7f, screenW, screenH);
+    // Inner bright core
+    float coreSize = flashSize * 0.4f;
+    drawRect(cx - coreSize/2 + 40, cy - coreSize/2 - 60,
+             coreSize, coreSize, {1.0f, 1.0f, 0.8f}, alpha * 0.9f, screenW, screenH);
+
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::renderDamageFlash(int screenW, int screenH, float timer) {
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float alpha = (timer / 0.3f) * 0.35f;
+    drawRect(0, 0, (float)screenW, (float)screenH, {0.8f, 0.0f, 0.0f}, alpha, screenW, screenH);
+
+    // Vignette edges (darker red on borders)
+    float edge = 60;
+    drawRect(0, 0, edge, (float)screenH, {0.6f, 0.0f, 0.0f}, alpha * 1.5f, screenW, screenH);
+    drawRect((float)screenW - edge, 0, edge, (float)screenH, {0.6f, 0.0f, 0.0f}, alpha * 1.5f, screenW, screenH);
+    drawRect(0, 0, (float)screenW, edge, {0.6f, 0.0f, 0.0f}, alpha * 1.5f, screenW, screenH);
+    drawRect(0, (float)screenH - edge, (float)screenW, edge, {0.6f, 0.0f, 0.0f}, alpha * 1.5f, screenW, screenH);
 
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);

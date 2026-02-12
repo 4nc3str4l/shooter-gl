@@ -21,7 +21,9 @@ public:
     void renderWeaponPickup(const WeaponPickup& w, float time = 0);
     void renderFirstPersonWeapon(WeaponType type, float fireCooldown, float time);
     void renderHUD(int health, int ammo, WeaponType weapon, int screenW, int screenH);
-    void renderCrosshair(int screenW, int screenH);
+    void renderCrosshair(int screenW, int screenH, bool hitMarker = false);
+    void renderMuzzleFlash(int screenW, int screenH, float timer);
+    void renderDamageFlash(int screenW, int screenH, float timer);
     void renderMenu(int screenW, int screenH, int selectedField,
                     const char* ipBuf, const char* portBuf,
                     const char* statusMsg, bool connecting);

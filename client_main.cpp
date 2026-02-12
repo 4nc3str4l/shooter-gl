@@ -71,6 +71,13 @@ static int g_screenW = 1280, g_screenH = 720;
 // Tab key for scoreboard
 static bool g_showScoreboard = false;
 
+// Shooting feedback
+static float g_localFireCooldown = 0;
+static float g_muzzleFlashTimer = 0;
+static float g_hitMarkerTimer = 0;
+static float g_damageFlashTimer = 0;
+static int   g_lastHealth = MAX_HEALTH;
+
 // ============================================================================
 // GLFW Callbacks
 // ============================================================================
@@ -515,10 +522,52 @@ int main(int, char**) {
                 // Input
                 captureInput();
 
-                // Client-side prediction
+                // Client-side fire tracking
+                if (g_localFireCooldown > 0) g_localFireCooldown -= g_deltaTime;
+                if (g_muzzleFlashTimer > 0) g_muzzleFlashTimer -= g_deltaTime;
+                if (g_hitMarkerTimer > 0) g_hitMarkerTimer -= g_deltaTime;
+                if (g_damageFlashTimer > 0) g_damageFlashTimer -= g_deltaTime;
+
+                // Client-side predicted shooting
                 if (g_localId >= 0 && g_localId < MAX_PLAYERS &&
                     g_players[g_localId].state == PlayerState::ALIVE) {
+
+                    if ((g_currentInput.keys & InputState::KEY_SHOOT) &&
+                        g_localFireCooldown <= 0 && g_players[g_localId].ammo > 0) {
+                        const auto& def = getWeaponDef(g_players[g_localId].currentWeapon);
+                        g_localFireCooldown = def.fireRate;
+                        g_muzzleFlashTimer = 0.06f;
+
+                        // Client-side hit prediction (for hit marker)
+                        Vec3 eyePos = g_players[g_localId].position;
+                        eyePos.y += PLAYER_EYE_HEIGHT;
+                        Vec3 dir = {
+                            sinf(g_yaw) * cosf(g_pitch),
+                            sinf(g_pitch),
+                            cosf(g_yaw) * cosf(g_pitch)
+                        };
+                        dir = dir.normalize();
+                        float playerDist = def.range;
+                        int hitP = GameMap::raycastPlayers(eyePos, dir, def.range,
+                                                          g_players, MAX_PLAYERS, g_localId, playerDist);
+                        Vec3 wallHit;
+                        float wallDist;
+                        bool hitWall = g_map.raycast(eyePos, dir, def.range, wallHit, wallDist);
+                        if (hitP >= 0 && (!hitWall || playerDist < wallDist)) {
+                            g_hitMarkerTimer = 0.2f;
+                        }
+                    }
+
                     tickPlayer(g_players[g_localId], g_currentInput, g_map, g_deltaTime);
+                }
+
+                // Detect damage taken
+                if (g_localId >= 0) {
+                    int curHealth = g_players[g_localId].health;
+                    if (curHealth < g_lastHealth && g_lastHealth > 0) {
+                        g_damageFlashTimer = 0.3f;
+                    }
+                    g_lastHealth = curHealth;
                 }
 
                 // Send input to server
@@ -529,12 +578,21 @@ int main(int, char**) {
 
                 // Render
                 Vec3 camPos;
+                float renderYaw = g_yaw;
+                float renderPitch = g_pitch;
                 if (g_localId >= 0) {
                     camPos = g_players[g_localId].position;
                     camPos.y += PLAYER_EYE_HEIGHT;
+
+                    // Screen shake on damage
+                    if (g_damageFlashTimer > 0) {
+                        float shake = g_damageFlashTimer * 0.03f;
+                        renderYaw += sinf(g_time * 60) * shake;
+                        renderPitch += cosf(g_time * 45) * shake;
+                    }
                 }
 
-                g_renderer.beginFrame(camPos, g_yaw, g_pitch);
+                g_renderer.beginFrame(camPos, renderYaw, renderPitch);
                 g_renderer.renderMap();
 
                 // Render other players
@@ -548,11 +606,16 @@ int main(int, char**) {
                     g_renderer.renderWeaponPickup(wp, g_time);
                 }
 
-                // First person weapon
+                // Muzzle flash (bright quad in front of weapon)
+                if (g_muzzleFlashTimer > 0 && g_localId >= 0) {
+                    g_renderer.renderMuzzleFlash(g_screenW, g_screenH, g_muzzleFlashTimer);
+                }
+
+                // First person weapon with local fire cooldown
                 if (g_localId >= 0) {
                     g_renderer.renderFirstPersonWeapon(
                         g_players[g_localId].currentWeapon,
-                        g_players[g_localId].fireCooldown,
+                        g_localFireCooldown,
                         g_time);
                 }
 
@@ -565,7 +628,13 @@ int main(int, char**) {
                         g_screenW, g_screenH);
                 }
 
-                g_renderer.renderCrosshair(g_screenW, g_screenH);
+                // Crosshair (with hit marker)
+                g_renderer.renderCrosshair(g_screenW, g_screenH, g_hitMarkerTimer > 0);
+
+                // Damage flash
+                if (g_damageFlashTimer > 0) {
+                    g_renderer.renderDamageFlash(g_screenW, g_screenH, g_damageFlashTimer);
+                }
 
                 // Kill feed
                 if (g_killFeedCount > 0) {
