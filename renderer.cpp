@@ -587,6 +587,7 @@ void Renderer::buildFontTexture() {
 
     glGenTextures(1, &fontTexture_);
     glBindTexture(GL_TEXTURE_2D, fontTexture_);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, atlasW, atlasH, 0, GL_RED, GL_UNSIGNED_BYTE, pixels.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -875,22 +876,27 @@ void Renderer::drawText(const char* text, float x, float y, float scale,
         int ch = text[i];
         if (ch < 32 || ch > 126) ch = '?';
         int idx = ch - 32;
-        float u0 = (idx % 16) * 8.0f / 128.0f;
-        float v0 = 1.0f - (idx / 16 + 1) * 8.0f / 64.0f;
+        int col = idx % 16;
+        int row = idx / 16;
+        float u0 = col * 8.0f / 128.0f;
         float u1 = u0 + 8.0f / 128.0f;
-        float v1 = v0 + 8.0f / 64.0f;
+        // OpenGL textures: row 0 of pixel data = v=0 (bottom). Our atlas has
+        // glyph row 0 (top of char) at lower pixel rows. So lower v = glyph top.
+        // Bottom of quad needs glyph bottom (higher v), top needs glyph top (lower v).
+        float vBot = (row + 1) * 8.0f / 64.0f; // glyph bottom row
+        float vTop = row * 8.0f / 64.0f;        // glyph top row
 
         float qx = x + i * charW;
         float qy = y;
 
         // Update quad positions and UVs
         float quadData[] = {
-            qx,          qy,          u0, v0,
-            qx + charW,  qy,          u1, v0,
-            qx + charW,  qy + charH,  u1, v1,
-            qx,          qy,          u0, v0,
-            qx + charW,  qy + charH,  u1, v1,
-            qx,          qy + charH,  u0, v1,
+            qx,          qy,          u0, vBot,
+            qx + charW,  qy,          u1, vBot,
+            qx + charW,  qy + charH,  u1, vTop,
+            qx,          qy,          u0, vBot,
+            qx + charW,  qy + charH,  u1, vTop,
+            qx,          qy + charH,  u0, vTop,
         };
         glBindBuffer(GL_ARRAY_BUFFER, quadVBO_);
         glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quadData), quadData);
