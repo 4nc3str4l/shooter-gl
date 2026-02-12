@@ -86,6 +86,9 @@ public:
     void renderFootprints();
     void updateFootprints(float dt);
 
+    // Vehicles
+    void renderVehicle(const VehicleData& v, float time = 0);
+
     // Text rendering
     void drawText(const char* text, float x, float y, float scale,
                   const Vec3& color, int screenW, int screenH);

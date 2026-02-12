@@ -32,6 +32,12 @@ struct Waypoint {
     std::vector<int> neighbors; // indices into waypoint array
 };
 
+struct VehicleSpawn {
+    Vec3 position;
+    float yaw;
+    VehicleType type;
+};
+
 // ============================================================================
 // GameMap
 // ============================================================================
@@ -44,8 +50,9 @@ public:
     const std::vector<SpawnPoint>&  spawns() const { return spawns_; }
     std::vector<WeaponPickup>&      weaponPickups() { return pickups_; }
     const std::vector<WeaponPickup>& weaponPickups() const { return pickups_; }
-    const std::vector<Waypoint>&    waypoints() const { return waypoints_; }
-    std::vector<Waypoint>&          waypoints() { return waypoints_; }
+    const std::vector<Waypoint>&       waypoints() const { return waypoints_; }
+    std::vector<Waypoint>&             waypoints() { return waypoints_; }
+    const std::vector<VehicleSpawn>&   vehicleSpawns() const { return vehicleSpawns_; }
 
     // Find nearest waypoint to a position
     int findNearestWaypoint(const Vec3& pos) const;
@@ -70,6 +77,7 @@ private:
     std::vector<SpawnPoint>    spawns_;
     std::vector<WeaponPickup>  pickups_;
     std::vector<Waypoint>      waypoints_;
+    std::vector<VehicleSpawn>  vehicleSpawns_;
 
     // Helpers for map building
     void addBlock(const Vec3& min, const Vec3& max, const Vec3& color, bool isFloor = false);

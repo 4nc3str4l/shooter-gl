@@ -42,7 +42,7 @@ void main() {
     float NdotL = max(dot(N, uSunDir), 0.0);
     vec3 lit = vColor * (uAmbient + uSunColor * NdotL);
     float dist = length(vWorldPos);
-    float fog = clamp((dist - 60.0) / 80.0, 0.0, 0.65);
+    float fog = clamp((dist - 200.0) / 300.0, 0.0, 0.65);
     vec3 fogColor = vec3(0.82, 0.85, 0.92);
     FragColor = vec4(mix(lit, fogColor, fog), 1.0);
 }
@@ -1453,4 +1453,79 @@ void Renderer::renderFootprints() {
     }
 
     glEnable(GL_CULL_FACE);
+}
+
+// ============================================================================
+// Vehicles
+// ============================================================================
+
+void Renderer::renderVehicle(const VehicleData& v, float time) {
+    if (!v.active) return;
+
+    Vec3 pos = v.position;
+    Mat4 base = Mat4::translate(pos) * Mat4::rotateY(-v.yaw);
+
+    if (v.type == VehicleType::JEEP) {
+        Vec3 oliveGreen = {0.33f, 0.42f, 0.18f};
+        Vec3 darkWheel  = {0.15f, 0.15f, 0.15f};
+        Vec3 blueGlass  = {0.4f, 0.55f, 0.7f};
+        Vec3 darkBar    = {0.12f, 0.12f, 0.12f};
+
+        // Body
+        Mat4 body = base * Mat4::translate({0.0f, 0.5f, 0.0f}) *
+                    Mat4::scale({3.5f, 1.0f, 2.0f});
+        drawCube(body, oliveGreen);
+
+        // 4 wheels at corners
+        float wheelX[] = {-1.4f, 1.4f, -1.4f, 1.4f};
+        float wheelZ[] = {-0.9f, -0.9f, 0.9f, 0.9f};
+        for (int i = 0; i < 4; i++) {
+            Mat4 wheel = base * Mat4::translate({wheelX[i], 0.2f, wheelZ[i]}) *
+                         Mat4::scale({0.4f, 0.4f, 0.4f});
+            drawCube(wheel, darkWheel);
+        }
+
+        // Windshield (thin blue-tinted cube on top front)
+        Mat4 windshield = base * Mat4::translate({1.0f, 1.15f, 0.0f}) *
+                          Mat4::scale({0.05f, 0.6f, 1.6f});
+        drawCube(windshield, blueGlass);
+
+        // Roll bar (thin dark cube across top)
+        Mat4 rollBar = base * Mat4::translate({-0.2f, 1.25f, 0.0f}) *
+                       Mat4::scale({0.1f, 0.1f, 2.0f});
+        drawCube(rollBar, darkBar);
+
+    } else if (v.type == VehicleType::TANK) {
+        Vec3 darkGreen   = {0.2f, 0.3f, 0.15f};
+        Vec3 turretColor = {0.22f, 0.32f, 0.17f};
+        Vec3 barrelColor = {0.18f, 0.18f, 0.18f};
+        Vec3 trackColor  = {0.12f, 0.12f, 0.1f};
+
+        // Body
+        Mat4 body = base * Mat4::translate({0.0f, 0.75f, 0.0f}) *
+                    Mat4::scale({5.0f, 1.5f, 3.0f});
+        drawCube(body, darkGreen);
+
+        // Tracks on sides
+        Mat4 trackL = base * Mat4::translate({0.0f, 0.3f, -1.6f}) *
+                      Mat4::scale({5.2f, 0.6f, 0.5f});
+        drawCube(trackL, trackColor);
+
+        Mat4 trackR = base * Mat4::translate({0.0f, 0.3f, 1.6f}) *
+                      Mat4::scale({5.2f, 0.6f, 0.5f});
+        drawCube(trackR, trackColor);
+
+        // Turret (rotates independently)
+        float totalTurretYaw = v.turretYaw + v.yaw;
+        Mat4 turretBase = Mat4::translate(pos) * Mat4::rotateY(-totalTurretYaw);
+
+        Mat4 turret = turretBase * Mat4::translate({0.0f, 1.9f, 0.0f}) *
+                      Mat4::scale({2.0f, 0.8f, 2.0f});
+        drawCube(turret, turretColor);
+
+        // Barrel (extends forward from turret)
+        Mat4 barrel = turretBase * Mat4::translate({3.0f, 2.0f, 0.0f}) *
+                      Mat4::scale({3.0f, 0.2f, 0.2f});
+        drawCube(barrel, barrelColor);
+    }
 }

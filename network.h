@@ -67,6 +67,19 @@ struct NetPlayerState {
     uint8_t  health = 0;
     uint8_t  weapon = 0;
     uint8_t  ammo = 0;
+    int16_t  vehicleId = -1;
+};
+
+// Per-vehicle state in snapshot
+struct NetVehicleState {
+    uint8_t  id = 0;
+    uint8_t  type = 0;
+    float    x = 0, y = 0, z = 0;
+    float    yaw = 0;
+    float    turretYaw = 0;
+    int16_t  health = 0;
+    int16_t  driverId = -1;
+    uint8_t  active = 1;
 };
 
 // Per-weapon-pickup state in snapshot
@@ -86,6 +99,8 @@ struct SnapshotPacket {
     // Followed by: NetPlayerState[numPlayers]
     // Then: uint8_t numWeapons
     // Then: NetWeaponState[numWeapons]
+    // Then: uint8_t numVehicles
+    // Then: NetVehicleState[numVehicles]
 };
 
 // Server -> Client: Hit notification

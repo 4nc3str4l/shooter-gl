@@ -60,6 +60,8 @@ static int              g_numBots = 0;
 static uint32_t         g_serverTick = 0;
 static UDPSocket        g_socket;
 static bool             g_running = true;
+static VehicleData      g_vehicles[MAX_VEHICLES];
+static int              g_numVehicles = 0;
 
 // Kill feed
 struct KillEvent {
@@ -180,7 +182,7 @@ static void spawnPlayer(int id) {
 // ============================================================================
 
 static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
-    uint8_t buf[2048];
+    uint8_t buf[8192];
     int offset = 0;
 
     SnapshotPacket hdr;
@@ -213,6 +215,7 @@ static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
         np.health = (uint8_t)std::clamp(g_players[i].health, 0, 255);
         np.weapon = (uint8_t)g_players[i].currentWeapon;
         np.ammo = (uint8_t)std::clamp(g_players[i].ammo, 0, 255);
+        np.vehicleId = g_players[i].vehicleId;
         memcpy(buf + offset, &np, sizeof(np));
         offset += sizeof(np);
     }
@@ -233,6 +236,27 @@ static void sendSnapshot(const sockaddr_in& addr, int clientPlayerId) {
         nw.active = wp.active ? 1 : 0;
         memcpy(buf + offset, &nw, sizeof(nw));
         offset += sizeof(nw);
+    }
+
+    // Vehicle states
+    uint8_t numVehicles = (uint8_t)g_numVehicles;
+    memcpy(buf + offset, &numVehicles, 1);
+    offset += 1;
+
+    for (int i = 0; i < g_numVehicles; i++) {
+        NetVehicleState nv;
+        nv.id = i;
+        nv.type = (uint8_t)g_vehicles[i].type;
+        nv.x = g_vehicles[i].position.x;
+        nv.y = g_vehicles[i].position.y;
+        nv.z = g_vehicles[i].position.z;
+        nv.yaw = g_vehicles[i].yaw;
+        nv.turretYaw = g_vehicles[i].turretYaw;
+        nv.health = (int16_t)g_vehicles[i].health;
+        nv.driverId = g_vehicles[i].driverId;
+        nv.active = g_vehicles[i].active ? 1 : 0;
+        memcpy(buf + offset, &nv, sizeof(nv));
+        offset += sizeof(nv);
     }
 
     g_socket.sendTo(buf, offset, addr);
@@ -421,6 +445,214 @@ static void processPickups(float dt) {
                 wp.respawnTimer = WEAPON_RESPAWN;
                 printf("Player %d picked up %s\n", i, getWeaponDef(wp.type).name);
                 break;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Vehicles
+// ============================================================================
+
+static void spawnVehicles() {
+    const auto& spawns = g_map.vehicleSpawns();
+    g_numVehicles = std::min((int)spawns.size(), MAX_VEHICLES);
+    for (int i = 0; i < g_numVehicles; i++) {
+        g_vehicles[i].type = spawns[i].type;
+        g_vehicles[i].position = spawns[i].position;
+        g_vehicles[i].yaw = spawns[i].yaw;
+        g_vehicles[i].spawnPos = spawns[i].position;
+        g_vehicles[i].spawnYaw = spawns[i].yaw;
+        g_vehicles[i].health = getVehicleDef(spawns[i].type).maxHealth;
+        g_vehicles[i].active = true;
+        g_vehicles[i].driverId = -1;
+        g_vehicles[i].turretYaw = 0;
+        g_vehicles[i].velocity = {0,0,0};
+        g_vehicles[i].fireCooldown = 0;
+        g_vehicles[i].respawnTimer = 0;
+    }
+}
+
+static void enterVehicle(int playerId) {
+    PlayerData& p = g_players[playerId];
+    if (p.vehicleId >= 0) return; // Already in vehicle
+
+    float bestDist = VEHICLE_ENTER_RANGE;
+    int bestVeh = -1;
+    for (int i = 0; i < g_numVehicles; i++) {
+        if (!g_vehicles[i].active || g_vehicles[i].driverId >= 0) continue;
+        float d = (p.position - g_vehicles[i].position).length();
+        if (d < bestDist) {
+            bestDist = d;
+            bestVeh = i;
+        }
+    }
+    if (bestVeh >= 0) {
+        p.vehicleId = bestVeh;
+        p.isDriver = true;
+        g_vehicles[bestVeh].driverId = playerId;
+    }
+}
+
+static void exitVehicle(int playerId) {
+    PlayerData& p = g_players[playerId];
+    if (p.vehicleId < 0) return;
+    int vid = p.vehicleId;
+    g_vehicles[vid].driverId = -1;
+    // Place player next to vehicle
+    p.position = g_vehicles[vid].position + Vec3{
+        sinf(g_vehicles[vid].yaw + PI * 0.5f) * 3.0f, 0,
+        cosf(g_vehicles[vid].yaw + PI * 0.5f) * 3.0f
+    };
+    p.position.y = 0.1f;
+    p.velocity = {0, 0, 0};
+    p.vehicleId = -1;
+    p.isDriver = false;
+}
+
+static void tickVehicles(float dt) {
+    for (int i = 0; i < g_numVehicles; i++) {
+        auto& v = g_vehicles[i];
+        if (!v.active) {
+            v.respawnTimer -= dt;
+            if (v.respawnTimer <= 0) {
+                v.position = v.spawnPos;
+                v.yaw = v.spawnYaw;
+                v.health = getVehicleDef(v.type).maxHealth;
+                v.active = true;
+                v.driverId = -1;
+                v.velocity = {0,0,0};
+                v.turretYaw = 0;
+            }
+            continue;
+        }
+
+        if (v.fireCooldown > 0) v.fireCooldown -= dt;
+
+        if (v.driverId >= 0 && v.driverId < MAX_PLAYERS) {
+            // Get driver's input
+            InputState* input = nullptr;
+            if (g_clients[v.driverId].active) {
+                input = &g_clients[v.driverId].lastInput;
+            } else {
+                for (int b = 0; b < g_numBots; b++) {
+                    if (g_bots[b].playerId == v.driverId) {
+                        input = &g_bots[b].input;
+                        break;
+                    }
+                }
+            }
+
+            if (input) {
+                const auto& def = getVehicleDef(v.type);
+
+                // Turning
+                if (input->keys & InputState::KEY_A) v.yaw += def.turnRate * dt;
+                if (input->keys & InputState::KEY_D) v.yaw -= def.turnRate * dt;
+
+                // Acceleration
+                float accel = 0;
+                if (input->keys & InputState::KEY_W) accel = def.speed;
+                if (input->keys & InputState::KEY_S) accel = -def.speed * 0.5f;
+
+                Vec3 forward = {sinf(v.yaw), 0, cosf(v.yaw)};
+                v.velocity = forward * accel;
+
+                // Tank turret follows driver aim
+                if (v.type == VehicleType::TANK) {
+                    v.turretYaw = input->yaw - v.yaw;
+                }
+
+                // Move vehicle
+                Vec3 newPos = v.position + v.velocity * dt;
+                newPos.y = 0.1f; // Vehicles stay on ground
+                // Simple boundary clamp
+                newPos.x = std::clamp(newPos.x, -190.0f, 190.0f);
+                newPos.z = std::clamp(newPos.z, -190.0f, 190.0f);
+                v.position = newPos;
+
+                // Update driver position to follow vehicle
+                g_players[v.driverId].position = v.position;
+                g_players[v.driverId].position.y = v.position.y + 1.0f;
+
+                // Vehicle shooting (tank cannon)
+                if ((input->keys & InputState::KEY_SHOOT) && def.cannonDamage > 0 && v.fireCooldown <= 0) {
+                    v.fireCooldown = def.cannonRate;
+                    float aimYaw = v.yaw + v.turretYaw;
+                    float aimPitch = input->pitch;
+                    Vec3 cannonDir = {
+                        sinf(aimYaw) * cosf(aimPitch),
+                        sinf(aimPitch),
+                        cosf(aimYaw) * cosf(aimPitch)
+                    };
+                    cannonDir = cannonDir.normalize();
+                    Vec3 cannonOrigin = v.position + Vec3{0, 2.5f, 0} + cannonDir * 3.0f;
+
+                    // Cannon hit check
+                    float pDist = 500.0f;
+                    int hitP = GameMap::raycastPlayers(cannonOrigin, cannonDir, 500.0f,
+                                                      g_players, MAX_PLAYERS, v.driverId, pDist);
+                    if (hitP >= 0) {
+                        g_players[hitP].health -= def.cannonDamage;
+                        if (g_players[hitP].health <= 0) {
+                            g_players[hitP].health = 0;
+                            g_players[hitP].state = PlayerState::DEAD;
+                            g_players[hitP].respawnTimer = RESPAWN_TIME;
+                            if (g_players[hitP].vehicleId >= 0) exitVehicle(hitP);
+                            PlayerDiedPacket diePkt;
+                            diePkt.victimId = hitP;
+                            diePkt.killerId = v.driverId;
+                            for (int c = 0; c < MAX_PLAYERS; c++) {
+                                if (g_clients[c].active)
+                                    g_socket.sendTo(&diePkt, sizeof(diePkt), g_clients[c].addr);
+                            }
+                        }
+                    }
+                }
+
+                // Run over players (vehicle collision damage)
+                float speed = v.velocity.length();
+                if (speed > 5.0f) {
+                    for (int p = 0; p < MAX_PLAYERS; p++) {
+                        if (p == v.driverId) continue;
+                        if (g_players[p].state != PlayerState::ALIVE) continue;
+                        if (g_players[p].vehicleId >= 0) continue; // Can't run over people in vehicles
+                        float d = (g_players[p].position - v.position).length();
+                        if (d < 2.5f) {
+                            int dmg = (int)(speed * 3.0f);
+                            g_players[p].health -= dmg;
+                            g_players[p].velocity = v.velocity * 0.5f + Vec3{0, 5, 0};
+                            if (g_players[p].health <= 0) {
+                                g_players[p].health = 0;
+                                g_players[p].state = PlayerState::DEAD;
+                                g_players[p].respawnTimer = RESPAWN_TIME;
+                                PlayerDiedPacket diePkt;
+                                diePkt.victimId = p;
+                                diePkt.killerId = v.driverId;
+                                for (int c = 0; c < MAX_PLAYERS; c++) {
+                                    if (g_clients[c].active)
+                                        g_socket.sendTo(&diePkt, sizeof(diePkt), g_clients[c].addr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // No driver: vehicle slows down
+            v.velocity = v.velocity * 0.95f;
+            if (v.velocity.lengthSq() < 0.01f) v.velocity = {0,0,0};
+        }
+
+        // Vehicle destruction
+        if (v.health <= 0) {
+            v.active = false;
+            v.respawnTimer = 30.0f; // Respawn in 30 seconds
+            if (v.driverId >= 0) {
+                g_players[v.driverId].health = 0;
+                g_players[v.driverId].state = PlayerState::DEAD;
+                g_players[v.driverId].respawnTimer = RESPAWN_TIME;
+                exitVehicle(v.driverId);
             }
         }
     }
@@ -886,14 +1118,14 @@ int main(int argc, char** argv) {
     srand((unsigned)time(nullptr));
 
     int port = DEFAULT_PORT;
-    int botCount = 4;
+    int botCount = 100;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-bots") == 0 && i + 1 < argc) {
             botCount = atoi(argv[++i]);
-            if (botCount > MAX_PLAYERS - 2) botCount = MAX_PLAYERS - 2;
+            if (botCount > MAX_PLAYERS - 4) botCount = MAX_PLAYERS - 4;
         }
     }
 
@@ -919,6 +1151,8 @@ int main(int argc, char** argv) {
     }
 
     spawnBots(botCount);
+    spawnVehicles();
+    printf("Vehicles spawned: %d\n", g_numVehicles);
 
     printf("Server running. Press Ctrl+C to stop.\n\n");
 
@@ -929,7 +1163,7 @@ int main(int argc, char** argv) {
         lastTime = now;
 
         // --- Receive packets ---
-        uint8_t buf[2048];
+        uint8_t buf[8192];
         sockaddr_in fromAddr;
         int len;
         while ((len = g_socket.recvFrom(buf, sizeof(buf), fromAddr)) > 0) {
@@ -988,14 +1222,32 @@ int main(int argc, char** argv) {
             }
 
             if (input) {
-                tickPlayer(g_players[i], *input, g_map, TICK_DURATION);
-
-                // Process shooting
-                if (input->keys & InputState::KEY_SHOOT) {
-                    processShot(i);
+                // Vehicle enter/exit
+                if (input->keys & InputState::KEY_USE) {
+                    if (g_players[i].vehicleId >= 0) {
+                        exitVehicle(i);
+                    } else {
+                        enterVehicle(i);
+                    }
+                    // Clear KEY_USE to avoid rapid toggle
+                    input->keys &= ~InputState::KEY_USE;
                 }
+
+                // Only tick player movement if NOT in vehicle
+                if (g_players[i].vehicleId < 0) {
+                    tickPlayer(g_players[i], *input, g_map, TICK_DURATION);
+
+                    // Process shooting (on foot)
+                    if (input->keys & InputState::KEY_SHOOT) {
+                        processShot(i);
+                    }
+                }
+                // In vehicle: shooting is handled by tickVehicles
             }
         }
+
+        // --- Tick vehicles ---
+        tickVehicles(TICK_DURATION);
 
         // --- Process weapon pickups ---
         processPickups(TICK_DURATION);

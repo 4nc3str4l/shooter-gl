@@ -191,7 +191,7 @@ struct AABB {
 // Game Constants
 // ============================================================================
 
-constexpr int    MAX_PLAYERS      = 16;
+constexpr int    MAX_PLAYERS      = 128;
 constexpr int    TICK_RATE        = 64;
 constexpr float  TICK_DURATION    = 1.0f / TICK_RATE;
 constexpr int    DEFAULT_PORT     = 27015;
@@ -206,6 +206,10 @@ constexpr float  RESPAWN_TIME     = 3.0f;
 constexpr float  WEAPON_RESPAWN   = 15.0f;
 constexpr int    MAX_HEALTH       = 100;
 constexpr float  PI               = 3.14159265358979f;
+
+// Vehicle constants
+constexpr int    MAX_VEHICLES     = 20;
+constexpr float  VEHICLE_ENTER_RANGE = 3.5f;
 
 // ============================================================================
 // Weapons
@@ -257,6 +261,7 @@ struct InputState {
     static constexpr uint16_t KEY_JUMP   = 0x10;
     static constexpr uint16_t KEY_SHOOT  = 0x20;
     static constexpr uint16_t KEY_RELOAD = 0x40;
+    static constexpr uint16_t KEY_USE    = 0x80;  // Enter/exit vehicle
 };
 
 struct PlayerData {
@@ -272,4 +277,47 @@ struct PlayerData {
     float       respawnTimer = 0;
     float       fireCooldown = 0;
     bool        isBot = false;
+    int16_t     vehicleId = -1;    // -1 = on foot, >=0 = in vehicle
+    bool        isDriver = false;
+};
+
+// ============================================================================
+// Vehicles
+// ============================================================================
+
+enum class VehicleType : uint8_t {
+    JEEP = 0, TANK, COUNT
+};
+
+struct VehicleDef {
+    const char* name;
+    float speed;
+    float turnRate;     // rad/s
+    int   maxHealth;
+    int   cannonDamage; // 0 = no cannon
+    float cannonRate;   // seconds between shots
+    float length, width, height;
+};
+
+inline const VehicleDef& getVehicleDef(VehicleType t) {
+    static const VehicleDef defs[] = {
+        {"Jeep",  22.0f, 2.5f, 250,   0,  0.0f, 3.5f, 2.0f, 1.8f},
+        {"Tank",   9.0f, 1.2f, 1200, 80,  2.0f, 5.0f, 3.0f, 2.5f},
+    };
+    return defs[static_cast<int>(t)];
+}
+
+struct VehicleData {
+    Vec3        position = {0, 0, 0};
+    float       yaw = 0;
+    float       turretYaw = 0;    // Relative to body (tank only)
+    Vec3        velocity = {0, 0, 0};
+    int         health = 0;
+    VehicleType type = VehicleType::JEEP;
+    int16_t     driverId = -1;
+    bool        active = true;
+    float       fireCooldown = 0;
+    float       respawnTimer = 0;
+    Vec3        spawnPos;
+    float       spawnYaw = 0;
 };

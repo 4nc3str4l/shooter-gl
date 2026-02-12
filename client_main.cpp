@@ -38,6 +38,11 @@ static InputState    g_currentInput;
 // Weapon pickups (received from server)
 static std::vector<WeaponPickup> g_weaponPickups;
 
+// Vehicles (received from server)
+static VehicleData g_vehicles[MAX_VEHICLES];
+static int g_numVehicles = 0;
+static bool g_usePressed = false; // For toggle behavior
+
 // View angles
 static float g_yaw = 0, g_pitch = 0;
 static double g_lastMouseX = 0, g_lastMouseY = 0;
@@ -243,7 +248,7 @@ static void addKillFeedEntry(const char* text) {
 }
 
 static void receivePackets() {
-    uint8_t buf[2048];
+    uint8_t buf[8192];
     sockaddr_in fromAddr;
     int len;
 
@@ -307,6 +312,26 @@ static void receivePackets() {
                     }
                 }
 
+                // Vehicle states
+                if (offset + 1 <= len) {
+                    uint8_t numVehicles = buf[offset++];
+                    g_numVehicles = numVehicles;
+                    for (uint8_t i = 0; i < numVehicles && offset + (int)sizeof(NetVehicleState) <= len; i++) {
+                        NetVehicleState nv;
+                        memcpy(&nv, buf + offset, sizeof(nv));
+                        offset += sizeof(nv);
+                        if (nv.id < MAX_VEHICLES) {
+                            g_vehicles[nv.id].type = (VehicleType)nv.type;
+                            g_vehicles[nv.id].position = {nv.x, nv.y, nv.z};
+                            g_vehicles[nv.id].yaw = nv.yaw;
+                            g_vehicles[nv.id].turretYaw = nv.turretYaw;
+                            g_vehicles[nv.id].health = nv.health;
+                            g_vehicles[nv.id].driverId = nv.driverId;
+                            g_vehicles[nv.id].active = nv.active != 0;
+                        }
+                    }
+                }
+
                 // Update local player state from server
                 if (g_localId >= 0 && g_localId < MAX_PLAYERS) {
                     auto& lp = g_players[g_localId];
@@ -361,6 +386,10 @@ static void captureInput() {
     if (glfwGetMouseButton(g_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
         g_currentInput.keys |= InputState::KEY_SHOOT;
     if (glfwGetKey(g_window, GLFW_KEY_R) == GLFW_PRESS)     g_currentInput.keys |= InputState::KEY_RELOAD;
+    // E key for vehicle enter/exit (toggle, send once per press)
+    bool eDown = glfwGetKey(g_window, GLFW_KEY_E) == GLFW_PRESS;
+    if (eDown && !g_usePressed) g_currentInput.keys |= InputState::KEY_USE;
+    g_usePressed = eDown;
 
     g_currentInput.yaw = g_yaw;
     g_currentInput.pitch = g_pitch;
@@ -572,7 +601,8 @@ int main(int, char**) {
                         g_renderer.spawnMuzzleSpark(eyePos + dir * 0.5f, dir);
                     }
 
-                    tickPlayer(g_players[g_localId], g_currentInput, g_map, g_deltaTime);
+                    if (g_players[g_localId].vehicleId < 0)
+                        tickPlayer(g_players[g_localId], g_currentInput, g_map, g_deltaTime);
                 }
 
                 // Detect damage taken
@@ -618,7 +648,14 @@ int main(int, char**) {
                 float renderPitch = g_pitch;
                 if (g_localId >= 0) {
                     camPos = g_players[g_localId].position;
-                    camPos.y += PLAYER_EYE_HEIGHT;
+                    if (g_players[g_localId].vehicleId >= 0) {
+                        // In vehicle: use vehicle position, higher camera
+                        int vid = g_players[g_localId].vehicleId;
+                        camPos = g_vehicles[vid].position;
+                        camPos.y += 3.0f;
+                    } else {
+                        camPos.y += PLAYER_EYE_HEIGHT;
+                    }
 
                     // Screen shake on damage
                     if (g_damageFlashTimer > 0) {
@@ -646,6 +683,11 @@ int main(int, char**) {
                     g_renderer.renderWeaponPickup(wp, g_time);
                 }
 
+                // Render vehicles
+                for (int i = 0; i < g_numVehicles; i++) {
+                    g_renderer.renderVehicle(g_vehicles[i], g_time);
+                }
+
                 // Particles (3D scene)
                 g_renderer.renderParticles();
 
@@ -669,6 +711,28 @@ int main(int, char**) {
                         g_players[g_localId].ammo,
                         g_players[g_localId].currentWeapon,
                         g_screenW, g_screenH);
+                }
+
+                // Vehicle prompt or info
+                if (g_localId >= 0 && g_players[g_localId].vehicleId >= 0) {
+                    int vid = g_players[g_localId].vehicleId;
+                    char vbuf[64];
+                    snprintf(vbuf, sizeof(vbuf), "%s  HP:%d  [E] Exit",
+                             getVehicleDef(g_vehicles[vid].type).name, g_vehicles[vid].health);
+                    g_renderer.drawText(vbuf, g_screenW * 0.5f - 120, 60, 2.5f, {0.5f, 1.0f, 0.5f}, g_screenW, g_screenH);
+                } else if (g_localId >= 0) {
+                    // Check if near a vehicle
+                    for (int i = 0; i < g_numVehicles; i++) {
+                        if (!g_vehicles[i].active || g_vehicles[i].driverId >= 0) continue;
+                        float d = (g_players[g_localId].position - g_vehicles[i].position).length();
+                        if (d < VEHICLE_ENTER_RANGE) {
+                            char vbuf[64];
+                            snprintf(vbuf, sizeof(vbuf), "[E] Enter %s", getVehicleDef(g_vehicles[i].type).name);
+                            g_renderer.drawText(vbuf, g_screenW * 0.5f - 80, g_screenH * 0.5f - 60, 2.5f,
+                                                {1, 1, 0.5f}, g_screenW, g_screenH);
+                            break;
+                        }
+                    }
                 }
 
                 // Crosshair (with hit marker)
@@ -720,6 +784,9 @@ int main(int, char**) {
                 }
                 for (const auto& wp : g_weaponPickups) {
                     g_renderer.renderWeaponPickup(wp, g_time);
+                }
+                for (int i = 0; i < g_numVehicles; i++) {
+                    g_renderer.renderVehicle(g_vehicles[i], g_time);
                 }
 
                 float timer = g_localId >= 0 ? g_players[g_localId].respawnTimer : RESPAWN_TIME;
