@@ -95,7 +95,7 @@ static void mouseCallback(GLFWwindow*, double xpos, double ypos) {
     g_lastMouseX = xpos;
     g_lastMouseY = ypos;
 
-    g_yaw += (float)dx * MOUSE_SENS;
+    g_yaw -= (float)dx * MOUSE_SENS;
     g_pitch -= (float)dy * MOUSE_SENS;
 
     // Clamp pitch
@@ -545,7 +545,7 @@ int main(int, char**) {
 
                 // Render weapon pickups
                 for (const auto& wp : g_weaponPickups) {
-                    g_renderer.renderWeaponPickup(wp);
+                    g_renderer.renderWeaponPickup(wp, g_time);
                 }
 
                 // First person weapon
@@ -601,7 +601,7 @@ int main(int, char**) {
                     g_renderer.renderPlayer(g_players[i], i == g_localId);
                 }
                 for (const auto& wp : g_weaponPickups) {
-                    g_renderer.renderWeaponPickup(wp);
+                    g_renderer.renderWeaponPickup(wp, g_time);
                 }
 
                 float timer = g_localId >= 0 ? g_players[g_localId].respawnTimer : RESPAWN_TIME;

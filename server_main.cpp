@@ -240,6 +240,12 @@ static void processShot(int shooterId) {
     shooter.fireCooldown = def.fireRate;
     shooter.ammo--;
 
+    // Auto-reload: when out of ammo, refill (simulates reload)
+    if (shooter.ammo <= 0) {
+        shooter.ammo = def.magSize;
+        shooter.fireCooldown = def.fireRate * 3; // Longer delay for reload
+    }
+
     Vec3 eyePos = shooter.position;
     eyePos.y += PLAYER_EYE_HEIGHT;
 

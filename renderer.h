@@ -18,7 +18,7 @@ public:
     void beginFrame(const Vec3& cameraPos, float yaw, float pitch);
     void renderMap();
     void renderPlayer(const PlayerData& p, bool isLocalPlayer);
-    void renderWeaponPickup(const WeaponPickup& w);
+    void renderWeaponPickup(const WeaponPickup& w, float time = 0);
     void renderFirstPersonWeapon(WeaponType type, float fireCooldown, float time);
     void renderHUD(int health, int ammo, WeaponType weapon, int screenW, int screenH);
     void renderCrosshair(int screenW, int screenH);

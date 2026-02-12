@@ -726,7 +726,7 @@ void Renderer::renderPlayer(const PlayerData& p, bool isLocalPlayer) {
     }
 }
 
-void Renderer::renderWeaponPickup(const WeaponPickup& w) {
+void Renderer::renderWeaponPickup(const WeaponPickup& w, float time) {
     if (!w.active) return;
 
     Vec3 pos = w.position;
@@ -740,11 +740,11 @@ void Renderer::renderWeaponPickup(const WeaponPickup& w) {
         default:                  color = {0.5f, 0.5f, 0.5f}; break;
     }
 
-    // Weapon as a small elongated cube floating and rotating
-    float bob = sinf(pos.x + pos.z) * 0.1f;
-    float rot = (pos.x * 1.1f + pos.z * 0.7f); // deterministic rotation per pickup
+    // Weapon as a small elongated cube floating, bobbing, and rotating
+    float bob = sinf(time * 2.0f + pos.x * 0.5f + pos.z * 0.3f) * 0.15f;
+    float rot = time * 1.5f + pos.x * 1.1f + pos.z * 0.7f;
 
-    Mat4 model = Mat4::translate({pos.x, pos.y + 0.3f + bob, pos.z}) *
+    Mat4 model = Mat4::translate({pos.x, pos.y + 0.4f + bob, pos.z}) *
                  Mat4::rotateY(rot) *
                  Mat4::scale({0.15f, 0.15f, 0.5f});
     drawCube(model, color);

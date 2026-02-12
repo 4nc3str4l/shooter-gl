@@ -432,7 +432,7 @@ void tickPlayer(PlayerData& p, const InputState& input, const GameMap& map, floa
 
     // Movement direction
     Vec3 forward = {sinf(p.yaw), 0, cosf(p.yaw)};
-    Vec3 right   = {cosf(p.yaw), 0, -sinf(p.yaw)};
+    Vec3 right   = {-cosf(p.yaw), 0, sinf(p.yaw)};
 
     float fwd = 0, side = 0;
     if (input.keys & InputState::KEY_W) fwd += 1;
