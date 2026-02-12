@@ -734,10 +734,12 @@ static void updateBotAI(BotData& bot, float dt) {
                 }
             }
 
-            // Shoot (after reaction delay)
+            // Shoot (after reaction delay, with miss chance)
             bot.reactionTimer -= dt;
             if (bot.reactionTimer <= 0 && canSeePlayer(id, tid)) {
-                bot.input.keys |= InputState::KEY_SHOOT;
+                if (randf() < 0.6f) { // 60% chance to actually pull trigger each tick
+                    bot.input.keys |= InputState::KEY_SHOOT;
+                }
             }
 
             // Retreat if low health
@@ -793,12 +795,12 @@ static void updateBotAI(BotData& bot, float dt) {
             if (tid >= 0 && tid < MAX_PLAYERS && g_players[tid].state == PlayerState::ALIVE) {
                 Vec3 toEnemy = g_players[tid].position - p.position;
                 if (canSeePlayer(id, tid)) {
-                    // Aim and shoot while running
+                    // Aim and shoot while running (very inaccurate)
                     float aimYaw = atan2f(toEnemy.x, toEnemy.z);
-                    bot.input.yaw = aimYaw + randf(-bot.aimJitter * 2, bot.aimJitter * 2);
+                    bot.input.yaw = aimYaw + randf(-bot.aimJitter * 3, bot.aimJitter * 3);
                     float hDist = sqrtf(toEnemy.x * toEnemy.x + toEnemy.z * toEnemy.z);
                     bot.input.pitch = atan2f(toEnemy.y + PLAYER_HEIGHT * 0.5f - PLAYER_EYE_HEIGHT, hDist);
-                    if (randf() < 0.5f) { // Don't always shoot while retreating
+                    if (randf() < 0.25f) { // Rarely shoot while retreating
                         bot.input.keys |= InputState::KEY_SHOOT;
                     }
                 }
@@ -867,8 +869,8 @@ static void spawnBots(int count) {
         g_bots[i].aiState = AIState::PATROL;
         g_bots[i].currentWaypoint = rand() % g_map.waypoints().size();
         g_bots[i].targetPos = g_map.waypoints()[g_bots[i].currentWaypoint].position;
-        g_bots[i].reactionDelay = randf(0.3f, 0.8f);
-        g_bots[i].aimJitter = randf(0.02f, 0.06f);
+        g_bots[i].reactionDelay = randf(0.6f, 1.5f);
+        g_bots[i].aimJitter = randf(0.06f, 0.14f);
         g_bots[i].lastPos = g_players[slot].position;
 
         printf("Spawned bot '%s' at slot %d\n", g_players[slot].name, slot);
